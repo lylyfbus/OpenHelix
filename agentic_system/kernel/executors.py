@@ -2,59 +2,68 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 
-def execute(executable: dict[str, Any], workspace: str | Path, timeout_seconds: int = 60) -> dict[str, Any]:
-    executor = str(executable.get("executor", ""))
+def execute(
+    *,
+    code_type: str,
+    script_path: str | None = None,
+    script: str | None = None,
+    workspace: str | Path,
+    timeout_seconds: int = 60,
+) -> dict[str, str]:
     cwd = Path(workspace).expanduser().resolve()
     cwd.mkdir(parents=True, exist_ok=True)
 
-    started_at = datetime.utcnow().isoformat()
-    if executor == "Bash":
-        command = str(executable.get("command", ""))
-        result = subprocess.run(
-            command,
-            cwd=str(cwd),
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    elif executor == "PythonExec":
-        code = str(executable.get("code", ""))
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    else:
-        raise RuntimeError(f"Unsupported executor: {executor}")
+    normalized_code_type = str(code_type).strip().lower()
+    path_value = str(script_path or "").strip()
+    script_value = str(script or "").strip()
 
-    ended_at = datetime.utcnow().isoformat()
-    status = "success" if result.returncode == 0 else "error"
+    has_path = bool(path_value)
+    has_script = bool(script_value)
+    if has_path == has_script:
+        raise ValueError("Exactly one of script_path or script must be provided")
+
+    if normalized_code_type == "python":
+        if has_path:
+            result = subprocess.run(
+                [sys.executable, path_value],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        else:
+            result = subprocess.run(
+                [sys.executable, "-c", script_value],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+    elif normalized_code_type == "bash":
+        if has_path:
+            result = subprocess.run(
+                ["bash", path_value],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        else:
+            result = subprocess.run(
+                script_value,
+                cwd=str(cwd),
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+    else:
+        raise ValueError(f"Unsupported code_type: {code_type}")
+
     return {
-        "executor": executor,
-        "started_at": started_at,
-        "ended_at": ended_at,
-        "return_code": result.returncode,
         "stdout": result.stdout,
         "stderr": result.stderr,
-        "status": status,
-        "artifacts": [],
-    }
-
-
-def compact_observation(result: dict[str, Any]) -> dict[str, Any]:
-    stdout = str(result.get("stdout", ""))
-    stderr = str(result.get("stderr", ""))
-    return {
-        "status": result.get("status", "error"),
-        "return_code": result.get("return_code"),
-        "stdout_preview": stdout[:500],
-        "stderr_preview": stderr[:500],
     }

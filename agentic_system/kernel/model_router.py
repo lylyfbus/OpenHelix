@@ -153,30 +153,41 @@ class ModelRouter:
         }
         self.provider_defaults: dict[str, dict[str, str]] = {
             "openai": {
-                "thinking": os.getenv("OPENAI_MODEL_THINKING", os.getenv("OPENAI_MODEL_PLANNING", "gpt-4o-mini")),
-                "coding": os.getenv("OPENAI_MODEL_CODING", "gpt-4o-mini"),
+                "core_agent": os.getenv("OPENAI_MODEL_CORE_AGENT", os.getenv("OPENAI_MODEL_THINKING", "gpt-4o-mini")),
+                "workflow_summarizer": os.getenv(
+                    "OPENAI_MODEL_WORKFLOW_SUMMARIZER",
+                    os.getenv("OPENAI_MODEL_THINKING", "gpt-4o-mini"),
+                ),
             },
             "anthropic": {
-                "thinking": os.getenv(
-                    "ANTHROPIC_MODEL_THINKING",
-                    os.getenv("ANTHROPIC_MODEL_PLANNING", "claude-3-5-sonnet-latest"),
+                "core_agent": os.getenv(
+                    "ANTHROPIC_MODEL_CORE_AGENT",
+                    os.getenv("ANTHROPIC_MODEL_THINKING", "claude-3-5-sonnet-latest"),
                 ),
-                "coding": os.getenv("ANTHROPIC_MODEL_CODING", "claude-3-5-sonnet-latest"),
+                "workflow_summarizer": os.getenv(
+                    "ANTHROPIC_MODEL_WORKFLOW_SUMMARIZER",
+                    os.getenv("ANTHROPIC_MODEL_THINKING", "claude-3-5-sonnet-latest"),
+                ),
             },
             "ollama": {
-                "thinking": os.getenv("OLLAMA_MODEL_THINKING", os.getenv("OLLAMA_MODEL_PLANNING", "llama3.1:8b")),
-                "coding": os.getenv("OLLAMA_MODEL_CODING", "llama3.1:8b"),
+                "core_agent": os.getenv("OLLAMA_MODEL_CORE_AGENT", os.getenv("OLLAMA_MODEL_THINKING", "llama3.1:8b")),
+                "workflow_summarizer": os.getenv(
+                    "OLLAMA_MODEL_WORKFLOW_SUMMARIZER",
+                    os.getenv("OLLAMA_MODEL_THINKING", "llama3.1:8b"),
+                ),
             },
         }
         if model_name:
-            self.provider_defaults[self.provider]["thinking"] = model_name
-            self.provider_defaults[self.provider]["coding"] = model_name
+            self.provider_defaults[self.provider]["core_agent"] = model_name
+            self.provider_defaults[self.provider]["workflow_summarizer"] = model_name
 
-    def select_model(self, task_type: str) -> str:
+    def _select_model(self, role: str) -> str:
         if self.model_name:
             return self.model_name
-        bucket = "coding" if task_type == "coding" else "thinking"
-        return self.provider_defaults[self.provider][bucket]
+        role_name = str(role).strip()
+        if role_name in self.provider_defaults[self.provider]:
+            return self.provider_defaults[self.provider][role_name]
+        return self.provider_defaults[self.provider]["core_agent"]
 
     @staticmethod
     def _parse_json_payload(text: str) -> dict[str, Any] | None:
@@ -200,14 +211,33 @@ class ModelRouter:
 
     def generate(
         self,
-        task_type: str,
-        prompt: str,
+        role: str,
+        state: Any,
+        prompt_engine: Any,
     ) -> dict[str, Any]:
-        model = self.select_model(task_type)
+        role_name = str(role).strip()
+        if not role_name:
+            return {}
+        if prompt_engine is None:
+            return {}
+        try:
+            final_prompt = prompt_engine.build_prompt(
+                agent_role=role_name,
+                input_payload={
+                    "workflow_summary": getattr(state, "workflow_summary", ""),
+                    "workflow_history": getattr(state, "workflow_hist", []),
+                },
+            )
+        except Exception:
+            return {}
+        if not isinstance(final_prompt, str) or not final_prompt.strip():
+            return {}
+
+        model = self._select_model(role_name)
         adapter = self.adapters[self.provider]
         response = adapter.generate(
             model=model,
-            prompt=prompt,
+            prompt=final_prompt,
         )
         payload = self._parse_json_payload(response.text or "")
         if isinstance(payload, dict):

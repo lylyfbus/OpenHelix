@@ -38,12 +38,7 @@ class AgentRuntime:
         self.policy = PolicyEngine()
         self.engine = FlowEngine(
             workspace=self.workspace,
-            model_router=self.model_router,
             mode=self.mode,
-            prompt_engine=self.prompt_engine,
-            skill_engine=self.skill_engine,
-            knowledge=self.knowledge,
-            policy=self.policy,
             approval_handler=self._default_approval_prompt,
         )
 
@@ -110,9 +105,14 @@ class AgentRuntime:
             print("Type /help for commands. Type /exit to quit.")
 
         try:
-            self.engine.run_core_session(
+            self.engine.run_session(
                 state=self.state,
                 command_handler=self._handle_command,
+                model_router=self.model_router,
+                prompt_engine=self.prompt_engine,
+                skill_engine=self.skill_engine,
+                knowledge_engine=self.knowledge,
+                policy_engine=self.policy,
             )
             return 0
         finally:
