@@ -68,7 +68,7 @@ class PromptEngine:
         self,
         workspace: str | Path,
         packaged_root: str | Path | None = None,
-        token_window_limit: int = 12000,
+        token_window_limit: int = int(256000*0.75),
         compact_keep_last_k: int = 10,
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()

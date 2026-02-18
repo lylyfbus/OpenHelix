@@ -17,17 +17,19 @@ class AgentRuntime:
     def __init__(
         self,
         workspace: str | Path,
-        mode: str = "safe",
+        provider: str = "ollama",
+        mode: str = "controlled",
         session_id: str | None = None,
         model_name: str | None = None,
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self.provider = str(provider).strip().lower() or "ollama"
         self.mode = mode
         self.state = StorageEngine(workspace=self.workspace, session_id=session_id)
         if session_id is not None:
             self.state.load_state()
-        self.model_router = ModelRouter(model_name=model_name)
+        self.model_router = ModelRouter(provider=self.provider, model_name=model_name)
         self.skill_engine = SkillEngine(workspace=self.workspace)
         self.prompt_engine = PromptEngine(workspace=self.workspace)
         self.knowledge = KnowledgeEngine(workspace=self.workspace)
@@ -62,20 +64,20 @@ class AgentRuntime:
                 "Commands:",
                 "  /help            Show help.",
                 "  /status          Show runtime status.",
+                "  /refresh         Start a new session in current workspace.",
                 "  /exit            Quit.",
             ]
         )
 
     def _status_text(self) -> str:
         workflow_summary = getattr(self.state, "workflow_summary", "")
-        active_task = getattr(self.state, "active_task", None)
         return "\n".join(
             [
                 f"session_id={self.state.session_id}",
+                f"provider={self.provider}",
                 f"mode={self.mode}",
                 f"full_proc_hist_lines={len(self.state.full_proc_hist)}",
                 f"workflow_hist_lines={len(self.state.workflow_hist)}",
-                f"active_task={active_task.get('task_id') if isinstance(active_task, dict) else None}",
                 f"workflow_summary={workflow_summary if isinstance(workflow_summary, str) else ''}",
             ]
         )
@@ -86,6 +88,8 @@ class AgentRuntime:
 
         if cmd in {"/help"}:
             return self._help_text()
+        if cmd in {"/refresh"}:
+            return "__REFRESH__"
         if cmd in {"/exit"}:
             return "__EXIT__"
         if cmd == "/status":
@@ -97,14 +101,21 @@ class AgentRuntime:
         show_banner: bool = True,
     ) -> int:
         if show_banner:
-            print(f"Session {self.state.session_id} started in mode={self.mode}")
+            print(f"Session {self.state.session_id} started in provider={self.provider}, mode={self.mode}")
             print("Type /help for commands. Type /exit to quit.")
 
         try:
-            self.engine.run_session(
-                state=self.state,
-                command_handler=self._handle_command,
-            )
+            while True:
+                status = self.engine.run_session(
+                    state=self.state,
+                    command_handler=self._handle_command,
+                )
+                if status == "__REFRESH__":
+                    self._persist()
+                    self.state = StorageEngine(workspace=self.workspace, session_id=None)
+                    print(f"Session refreshed. New session_id={self.state.session_id}")
+                    continue
+                break
             return 0
         finally:
             self.shutdown()

@@ -3,7 +3,8 @@ __pycache__/
 runtime/
 sessions/
 memory/
-skills/
 checkpoints/
+knowledge/
+skills/_proposals/
 .DS_Store
 .pytest_cache/

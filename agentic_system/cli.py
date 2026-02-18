@@ -8,7 +8,18 @@ from .runtime import AgentRuntime
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Agentic System (clean runtime kernel)")
-    parser.add_argument("--mode", default="safe", choices=["auto", "business", "safe"])
+    parser.add_argument(
+        "--provider",
+        default="ollama",
+        choices=["ollama", "openai", "claude"],
+        help="LLM provider. Currently implemented: ollama.",
+    )
+    parser.add_argument(
+        "--mode",
+        default="controlled",
+        choices=["auto", "controlled"],
+        help="auto: execute without confirmation; controlled: ask confirmation before each exec",
+    )
     parser.add_argument("--session-id", default=None)
     parser.add_argument(
         "--workspace",
@@ -30,6 +41,7 @@ def main() -> int:
 
     runtime = AgentRuntime(
         workspace=workspace,
+        provider=args.provider,
         mode=args.mode,
         session_id=args.session_id,
         model_name=args.model_name,

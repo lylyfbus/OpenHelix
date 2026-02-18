@@ -46,6 +46,8 @@ class FlowEngine:
             state.workflow_summary = ""
 
     def _confirm_exec(self, action_input: dict[str, Any]) -> bool:
+        if str(self.mode).strip().lower() == "auto":
+            return True
         if self.approval_handler is None:
             return True
         signature = json.dumps(
@@ -62,6 +64,21 @@ class FlowEngine:
             return bool(allowed)
         except Exception:
             return False
+
+    @staticmethod
+    def _normalize_llm_response(response: Any) -> tuple[str, str, dict[str, Any]]:
+        if not isinstance(response, dict):
+            return "", "none", {}
+        raw_response = str(response.get("raw_response", ""))
+        action = str(response.get("action", "none")).strip().lower() or "none"
+        action_input_raw = response.get("action_input", {})
+        action_input = dict(action_input_raw) if isinstance(action_input_raw, dict) else {}
+        return raw_response, action, action_input
+
+    @staticmethod
+    def _stream_to_stdout(token: str) -> None:
+        if token:
+            print(token, end="", flush=True)
 
     def _run_core_agent_loop(
         self,
@@ -81,19 +98,21 @@ class FlowEngine:
             state=state,
             model_router=model_router,
         )
+
         response = model_router.generate(
             role="core_agent",
-            final_prompt=final_prompt
+            final_prompt=final_prompt,
+            raw_response_callback=self._stream_to_stdout,
         )
+        print()
+        raw_response, action, action_input = self._normalize_llm_response(response)
         state.update_state(
             role="core_agent",
-            text=str(response.get("raw_response", "")),
+            text=raw_response,
             prompt_engine=prompt_engine,
             model_router=model_router,
         )
         state.save_state()
-        action = str(response.get("action", "none")).strip().lower()
-        action_input = dict(response.get("action_input", {}))
 
         while action not in TERMINAL_TOKENS and turns < max_turns:
             turns += 1
@@ -167,19 +186,21 @@ class FlowEngine:
                 state=state,
                 model_router=model_router,
             )
+
             response = model_router.generate(
                 role="core_agent",
-                final_prompt=final_prompt
+                final_prompt=final_prompt,
+                raw_response_callback=self._stream_to_stdout,
             )
+            print()
+            raw_response, action, action_input = self._normalize_llm_response(response)
             state.update_state(
                 role="core_agent",
-                text=str(response.get("raw_response", "")),
+                text=raw_response,
                 prompt_engine=prompt_engine,
                 model_router=model_router,
             )
             state.save_state()
-            action = str(response.get("action", "none")).strip().lower()
-            action_input = dict(response.get("action_input", {}))
 
         if turns >= max_turns:
             state.update_state(
@@ -194,7 +215,7 @@ class FlowEngine:
         self,
         state: StorageEngine,
         command_handler: Callable[[str], str] | None = None,
-    ) -> None:
+    ) -> str:
         model_router = self.model_router
         prompt_engine = self.prompt_engine
         if model_router is None or prompt_engine is None:
@@ -218,7 +239,9 @@ class FlowEngine:
             if command_handler is not None and stripped.startswith("/"):
                 command_out = command_handler(stripped)
                 if command_out == "__EXIT__":
-                    break
+                    return "__EXIT__"
+                if command_out == "__REFRESH__":
+                    return "__REFRESH__"
                 if command_out:
                     print(command_out)
                 continue
@@ -233,3 +256,4 @@ class FlowEngine:
             self._run_core_agent_loop(
                 state,
             )
+        return "__EXIT__"

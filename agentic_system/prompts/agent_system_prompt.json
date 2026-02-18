@@ -45,6 +45,8 @@
     "- raw_response contains your full natural-language response, including next-action intent.",
     "- action is the structured extraction of the next action from raw_response.",
     "- action_input is the structured extraction of needed inputs from raw_response.",
+    "- Keep the top-level output strictly as {raw_response, action, action_input}.",
+    "- action_input can contain nested sub-fields when needed by the selected action.",
     "- If action is exec, action_input must include code_type and exactly one of script or script_path.",
     "- action_input may be {} when action is chat_with_requester or none.",
     "- If no next action is needed, set action to \"none\" and action_input to {}.",

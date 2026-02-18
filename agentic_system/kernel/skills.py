@@ -11,7 +11,7 @@ class SkillEngine:
     def __init__(self, workspace: str | Path, packaged_root: str | Path | None = None) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.runtime_skills_root = self.workspace / "skills"
-        default_packaged = Path(__file__).resolve().parents[1] / "skills"
+        default_packaged = Path(__file__).resolve().parents[2] / "skills"
         self.packaged_root = Path(packaged_root).resolve() if packaged_root else default_packaged
         self._bootstrap_runtime_skills()
 
@@ -216,6 +216,8 @@ class SkillEngine:
             if rel_path == "SKILL.md":
                 continue
             parts = file_path.relative_to(skill_dir).parts
+            if "__pycache__" in parts or file_path.suffix == ".pyc":
+                continue
             top = parts[0] if parts else ""
             if top == "scripts":
                 payload["scripts"].append({"path": rel_path})
