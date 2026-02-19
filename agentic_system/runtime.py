@@ -31,7 +31,7 @@ class AgentRuntime:
             self.state.load_state()
         self.model_router = ModelRouter(provider=self.provider, model_name=model_name)
         self.skill_engine = SkillEngine(workspace=self.workspace)
-        self.prompt_engine = PromptEngine(workspace=self.workspace)
+        self.prompt_engine = PromptEngine(workspace=self.workspace, token_window_limit=9000)
         self.knowledge = KnowledgeEngine(workspace=self.workspace)
         self.policy = PolicyEngine()
         self.engine = FlowEngine(
@@ -68,6 +68,7 @@ class AgentRuntime:
                 "  /status workflow_hist      Show workflow_hist lines.",
                 "  /status full_proc_hist     Show full_proc_hist lines.",
                 "  /status action_hist        Show LLM selected action history.",
+                "  /status core_agent_prompt  Show the last full prompt sent to core_agent.",
                 "  /refresh         Start a new session in current workspace.",
                 "  /exit            Quit.",
             ]
@@ -108,6 +109,11 @@ class AgentRuntime:
             return "(empty)"
         return "\n".join(str(line) for line in rows)
 
+    def _status_core_agent_prompt_text(self) -> str:
+        text = getattr(self.engine, "last_core_agent_prompt", "")
+        value = text if isinstance(text, str) else ""
+        return value if value.strip() else "(empty)"
+
     def _handle_command(self, command_line: str) -> str:
         parts = command_line.split(maxsplit=1)
         cmd = parts[0].lower()
@@ -130,7 +136,9 @@ class AgentRuntime:
                 return self._status_full_proc_hist_text()
             if target == "action_hist":
                 return self._status_action_hist_text()
-            return "Unknown /status target. Use: workflow_summary | workflow_hist | full_proc_hist | action_hist"
+            if target == "core_agent_prompt":
+                return self._status_core_agent_prompt_text()
+            return "Unknown /status target. Use: workflow_summary | workflow_hist | full_proc_hist | action_hist | core_agent_prompt"
         return f"Unknown command: {cmd}. Use /help."
 
     def start(

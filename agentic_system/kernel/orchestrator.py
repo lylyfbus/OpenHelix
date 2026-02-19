@@ -36,6 +36,7 @@ class FlowEngine:
         self.knowledge_engine = knowledge_engine
         self.policy_engine = policy_engine
         self.approval_handler = approval_handler
+        self.last_core_agent_prompt: str = ""
         self.limits = deepcopy(DEFAULT_LIMITS)
         if limits:
             self.limits.update(limits)
@@ -124,6 +125,7 @@ class FlowEngine:
             model_router=model_router,
             skill_engine=self.skill_engine,
         )
+        self.last_core_agent_prompt = final_prompt
         on_chunk, finish_stream = self._build_stream_printer("core_agent")
 
         response = model_router.generate(
@@ -248,6 +250,7 @@ class FlowEngine:
                 model_router=model_router,
                 skill_engine=self.skill_engine,
             )
+            self.last_core_agent_prompt = final_prompt
             on_chunk, finish_stream = self._build_stream_printer("core_agent")
 
             response = model_router.generate(

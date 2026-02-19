@@ -1168,6 +1168,6 @@ def run_core_session():
         append_hist(core, "core_agent", result["final_report"])
 ```
 
-Can you teach me the SOTA reinforcement learning algorithm used in today's LLM post-training? I need the most recent knowledge.
+Do you know SKILL which is introduced by Anthropic for agent design?
 
 python -m agentic_system --workspace ./runtime_test --provider lmstudio --model-name "zai-org/glm-4.7-flash" --mode controlled

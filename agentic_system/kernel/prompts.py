@@ -9,6 +9,7 @@ from typing import Any
 class PromptEngine:
     _AGENT_ROLES_PLACEHOLDER = "{{AGENT_ROLES_FROM_JSON}}"
     _SKILLS_META_PLACEHOLDER = "{{SKILLS_META_FROM_JSON}}"
+    _RUNTIME_WORKSPACE_PLACEHOLDER = "{{RUNTIME_WORKSPACE}}"
     WORKFLOW_SUMMARIZER_PROMPT = "\n".join(
         [
             "You are an objective observer of the full working history of an agentic system.",
@@ -153,7 +154,7 @@ class PromptEngine:
             return ""
 
         descriptions = self._load_json_map(self.agent_role_descriptions_path)
-        lines = ["Agent Roles (Loaded from agent_role_description.json):"]
+        lines = ["Below is the description of agent roles for your reference:"]
         if descriptions:
             for item_role in sorted(descriptions.keys()):
                 desc = str(descriptions.get(item_role, "")).strip()
@@ -163,7 +164,7 @@ class PromptEngine:
         roles_section = "\n".join(lines)
 
         skill_scope = "core+all" if role == "core_agent" else "all"
-        skills_lines = [f"Skills Metadata (Loaded via SkillEngine.load_skill_meta, scope={skill_scope}):"]
+        skills_lines = [f"Below is the available skill metadata:"]
         skills_text = ""
         try:
             skills_text = str(skill_engine.load_skill_meta(scope=skill_scope)).strip()
@@ -178,12 +179,11 @@ class PromptEngine:
         text = selected.strip()
         if self._AGENT_ROLES_PLACEHOLDER in text:
             text = text.replace(self._AGENT_ROLES_PLACEHOLDER, roles_section)
-        else:
-            text = text + "\n\n" + roles_section
+
         if self._SKILLS_META_PLACEHOLDER in text:
             text = text.replace(self._SKILLS_META_PLACEHOLDER, skills_section)
-        else:
-            text = text + "\n\n" + skills_section
+        if self._RUNTIME_WORKSPACE_PLACEHOLDER in text:
+            text = text.replace(self._RUNTIME_WORKSPACE_PLACEHOLDER, str(self.workspace))
         return text
 
     def _compact_workflow_history(
