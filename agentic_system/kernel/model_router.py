@@ -270,8 +270,8 @@ class ModelRouter:
 
     @staticmethod
     def _stream_raw_response_from_chunk_factory(callback: Callable[[str], None]) -> Callable[[str], None]:
-        prefix = '"raw_response":"'
-        prefix_idx = 0
+        key_pattern = re.compile(r'"raw_response"\s*:\s*"')
+        search_buffer = ""
         capture = False
         done = False
         escape = False
@@ -282,24 +282,13 @@ class ModelRouter:
             if token:
                 callback(token)
 
-        def on_chunk(chunk: str) -> None:
-            nonlocal prefix_idx, capture, done, escape, unicode_remaining, unicode_digits
+        def consume_string_chars(text: str) -> None:
+            nonlocal done, escape, unicode_remaining, unicode_digits
             if done:
                 return
-            for ch in chunk:
+            for ch in text:
                 if done:
                     return
-
-                if not capture:
-                    if ch == prefix[prefix_idx]:
-                        prefix_idx += 1
-                        if prefix_idx == len(prefix):
-                            capture = True
-                            prefix_idx = 0
-                        continue
-                    prefix_idx = 1 if ch == prefix[0] else 0
-                    continue
-
                 if unicode_remaining > 0:
                     if ch.lower() in "0123456789abcdef":
                         unicode_digits += ch
@@ -342,6 +331,27 @@ class ModelRouter:
                     done = True
                     return
                 emit(ch)
+
+        def on_chunk(chunk: str) -> None:
+            nonlocal search_buffer, capture
+            if done or not chunk:
+                return
+            if capture:
+                consume_string_chars(chunk)
+                return
+
+            search_buffer += chunk
+            match = key_pattern.search(search_buffer)
+            if not match:
+                if len(search_buffer) > 256:
+                    search_buffer = search_buffer[-256:]
+                return
+
+            capture = True
+            remainder = search_buffer[match.end() :]
+            search_buffer = ""
+            if remainder:
+                consume_string_chars(remainder)
 
         return on_chunk
 
