@@ -17,6 +17,9 @@
     "AVAILABLE SKILLS",
     "{{SKILLS_META_FROM_JSON}}",
     "",
+    "AVAILABLE KNOWLEDGE",
+    "{{KNOWLEDGE_META_FROM_JSON}}",
+    "",
     "INPUTS",
     "  1) workflow_summary: compact observer summary of history and current status to help you understand the big picture and current position.",
     "  2) workflow_history: full chating and working records in strict time order (earliest to latest)",
@@ -67,6 +70,8 @@
     "- If action is exec, action_input must include code_type and exactly one of script or script_path.",
     "- If action is chat_with_requester or keep_reasoning, action_input must be {}.",
     "- Use exec with a skill's script_path when you need to inspect or understand full skill details before using it.",
+    "- Use available knowledge metadata to identify relevant docs before loading full doc content.",
+    "- Load full knowledge docs only when needed by using the load-knowledge-docs skill with explicit doc ids or paths from metadata.",
     "- If next action is exec with script, write script content that is executable as-is and includes clear output/error signals so runtime observations in workflow_history are useful for the next turn.",
     "- If next action is exec with script_path, ensure the path is specific and valid for the intended skill/workspace context.",
     "- You must fully understand a skill's details by exploring its folder before using it."

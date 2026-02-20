@@ -10,6 +10,8 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+_EXECUTED_SKILL = "search-online-context"
+
 
 def _http_get_text(url: str, timeout: int) -> str:
     req = Request(
@@ -119,6 +121,31 @@ def fetch_context(url: str, max_chars: int, timeout: int) -> tuple[str, str]:
     return text, ""
 
 
+def _format_fetched_context(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    blocks: list[str] = []
+    for row in rows:
+        title = str(row.get("title", "")).strip()
+        url = str(row.get("url", "")).strip()
+        status = str(row.get("status", "")).strip()
+        context = str(row.get("context", "")).strip()
+        error = str(row.get("error", "")).strip()
+        blocks.append(
+            "\n".join(
+                [
+                    f"# {title}".strip(),
+                    f"url: {url}",
+                    f"status: {status}",
+                    "context:",
+                    context if context else "(empty)",
+                    f"error: {error}" if error else "error: (none)",
+                ]
+            )
+        )
+    return "\n\n---\n\n".join(blocks)
+
+
 def run(
     *,
     query: str,
@@ -132,12 +159,10 @@ def run(
     safesearch: int,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        "executed_skill": _EXECUTED_SKILL,
+        "status": "ok",
         "query": query,
-        "search_engine": "searxng",
-        "searxng_base_url": searxng_base_url,
-        "search_results": [],
-        "fetched_context": [],
-        "errors": [],
+        "fetched_context": "",
     }
 
     try:
@@ -150,16 +175,18 @@ def run(
             categories=categories,
             safesearch=safesearch,
         )
-        payload["search_results"] = results
     except Exception as exc:
-        payload["errors"].append(f"search_error: {exc}")
+        payload["status"] = "error"
+        payload["fetched_context"] = f"search_error: {exc}"
         return payload
 
-    if not payload["search_results"]:
-        payload["errors"].append("search_error: no results found")
+    if not results:
+        payload["status"] = "error"
+        payload["fetched_context"] = "search_error: no results found"
         return payload
 
-    for item in payload["search_results"][: max(0, fetch_count)]:
+    fetched_rows: list[dict[str, Any]] = []
+    for item in results[: max(0, fetch_count)]:
         rank = int(item.get("rank", 0))
         title = str(item.get("title", "")).strip()
         url = str(item.get("url", "")).strip()
@@ -182,7 +209,9 @@ def run(
         except Exception as exc:
             row["status"] = "error"
             row["error"] = str(exc)
-        payload["fetched_context"].append(row)
+        fetched_rows.append(row)
+
+    payload["fetched_context"] = _format_fetched_context(fetched_rows)
 
     return payload
 

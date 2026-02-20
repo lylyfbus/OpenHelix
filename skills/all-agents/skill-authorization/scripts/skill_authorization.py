@@ -8,29 +8,22 @@ from pathlib import Path
 from typing import Any
 
 _SKILL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_EXECUTED_SKILL = "skill-authorization"
 
 
-def _ok(action: str, skill_id: str, scope: str, summary: str, details: dict[str, Any], next_step: str) -> dict[str, Any]:
+def _ok(skill_target: str) -> dict[str, Any]:
     return {
+        "executed_skill": _EXECUTED_SKILL,
         "status": "ok",
-        "action": action,
-        "skill_id": skill_id,
-        "scope": scope,
-        "summary": summary,
-        "next_step": next_step,
-        "details": details,
+        "skill_created/updated": skill_target,
     }
 
 
-def _err(action: str, skill_id: str, scope: str, summary: str, details: dict[str, Any], next_step: str = "review_inputs") -> dict[str, Any]:
+def _err(skill_target: str = "") -> dict[str, Any]:
     return {
+        "executed_skill": _EXECUTED_SKILL,
         "status": "error",
-        "action": action,
-        "skill_id": skill_id,
-        "scope": scope,
-        "summary": summary,
-        "next_step": next_step,
-        "details": details,
+        "skill_created/updated": skill_target,
     }
 
 
@@ -117,23 +110,8 @@ def run_inspect(workspace: Path, skill_id: str, scope: str) -> dict[str, Any]:
             if p.is_file():
                 scripts.append(str(p.relative_to(workspace)))
 
-    summary = "skill exists" if exists else "skill not found"
-    next_step = "proceed_with_update" if exists else "scaffold_skill"
-
-    return _ok(
-        action="inspect",
-        skill_id=skill_id,
-        scope=scope,
-        summary=summary,
-        next_step=next_step,
-        details={
-            "skill_dir": str(skill_dir.relative_to(workspace)),
-            "exists": exists,
-            "skill_md_exists": skill_md_exists,
-            "frontmatter": frontmatter,
-            "scripts": scripts,
-        },
-    )
+    _ = (skill_md_exists, frontmatter, scripts, workspace)
+    return _ok(skill_target=(skill_id if exists else ""))
 
 
 def run_scaffold(workspace: Path, skill_id: str, scope: str, description: str, overwrite: bool) -> dict[str, Any]:
@@ -163,18 +141,8 @@ def run_scaffold(workspace: Path, skill_id: str, scope: str, description: str, o
         skill_md.write_text(template, encoding="utf-8")
         updated.append(str(skill_md.relative_to(workspace)))
 
-    return _ok(
-        action="scaffold",
-        skill_id=skill_id,
-        scope=scope,
-        summary="skill scaffold ready",
-        next_step="edit_skill_content",
-        details={
-            "skill_dir": str(skill_dir.relative_to(workspace)),
-            "created": created,
-            "updated": updated,
-        },
-    )
+    _ = (workspace, created, updated)
+    return _ok(skill_target=skill_id)
 
 
 def parse_args() -> argparse.Namespace:
@@ -196,13 +164,7 @@ def main() -> int:
     workspace = Path(args.workspace).expanduser().resolve()
 
     if not _SKILL_ID_RE.match(skill_id):
-        out = _err(
-            action=action,
-            skill_id=skill_id,
-            scope=scope,
-            summary="invalid skill_id format",
-            details={"expected_pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
-        )
+        out = _err()
         print(json.dumps(out, ensure_ascii=True))
         return 1
 
@@ -219,17 +181,10 @@ def main() -> int:
             )
         print(json.dumps(out, ensure_ascii=True))
         return 0 if out.get("status") == "ok" else 1
-    except Exception as exc:  # unexpected runtime failure
-        out = _err(
-            action=action,
-            skill_id=skill_id,
-            scope=scope,
-            summary="unexpected failure",
-            details={"error_type": exc.__class__.__name__},
-            next_step="retry_or_fix_script",
-        )
+    except Exception:  # unexpected runtime failure
+        out = _err()
         print(json.dumps(out, ensure_ascii=True))
-        print(f"unexpected error: {exc}", file=sys.stderr)
+        print("unexpected error", file=sys.stderr)
         return 2
 
 

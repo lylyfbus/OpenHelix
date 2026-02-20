@@ -1,6 +1,6 @@
 ---
-name: Understand Skill
-handler: scripts/understand_skill.py
+name: Load Skill
+handler: scripts/load_skill.py
 description: Load full skill details (SKILL.md and script paths) into runtime history before execution.
 required_tools: exec
 recommended_tools: exec
@@ -19,7 +19,7 @@ Use this skill to load the full details of another skill into runtime history be
 
 # Script
 
-- Path: `skills/all-agents/understand-skill/scripts/understand_skill.py`
+- Path: `skills/all-agents/load-skill/scripts/load_skill.py`
 - Executor: `python`
 
 # Preferred Action Input Template
@@ -27,7 +27,7 @@ Use this skill to load the full details of another skill into runtime history be
 ```json
 {
   "code_type": "python",
-  "script_path": "skills/all-agents/understand-skill/scripts/understand_skill.py",
+  "script_path": "skills/all-agents/load-skill/scripts/load_skill.py",
   "script_args": [
     "--skill-id", "search-online-context",
     "--scope", "all-agents"
@@ -39,16 +39,8 @@ Use this skill to load the full details of another skill into runtime history be
 
 ```json
 {
+  "executed_skill": "load-skill",
   "status": "ok|error",
-  "action": "understand",
-  "skill_id": "...",
-  "scope": "all-agents|core-agent",
-  "summary": "...",
-  "next_step": "...",
-  "details": {
-    "skill_path": "...",
-    "scripts": ["..."],
-    "skill_context": "..."
-  }
+  "skill_context": "..."
 }
 ```

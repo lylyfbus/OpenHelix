@@ -63,13 +63,9 @@ Scaffold example:
 
 ```json
 {
+  "executed_skill": "skill-authorization",
   "status": "ok|error",
-  "action": "inspect|scaffold",
-  "skill_id": "...",
-  "scope": "all-agents|core-agent",
-  "summary": "...",
-  "next_step": "...",
-  "details": {}
+  "skill_created/updated": "target-skill-id-or-empty"
 }
 ```
 

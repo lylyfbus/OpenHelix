@@ -8,6 +8,7 @@ from typing import Any
 class PromptEngine:
     _AGENT_ROLES_PLACEHOLDER = "{{AGENT_ROLES_FROM_JSON}}"
     _SKILLS_META_PLACEHOLDER = "{{SKILLS_META_FROM_JSON}}"
+    _KNOWLEDGE_META_PLACEHOLDER = "{{KNOWLEDGE_META_FROM_JSON}}"
     _RUNTIME_WORKSPACE_PLACEHOLDER = "{{RUNTIME_WORKSPACE}}"
     WORKFLOW_SUMMARIZER_PROMPT = "\n".join(
         [
@@ -77,6 +78,7 @@ class PromptEngine:
         self.workspace = Path(workspace).expanduser().resolve()
         self.runtime_prompts_root = self.workspace / "prompts"
         self.runtime_skills_root = self.workspace / "skills"
+        self.runtime_knowledge_root = self.workspace / "knowledge"
         self.token_window_limit = int(token_window_limit)
         self.compact_keep_last_k = max(1, int(compact_keep_last_k))
         self.system_prompts_path = self.runtime_prompts_root / "agent_system_prompt.json"
@@ -198,6 +200,55 @@ class PromptEngine:
             return "- (no skills found)"
         return "\n".join("- " + json.dumps(row, ensure_ascii=True) for row in rows)
 
+    @staticmethod
+    def _normalize_tags(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return []
+
+    def _load_knowledge_meta_text(self, role: str, limit: int = 80) -> str:
+        role_name = str(role).strip()
+        if role_name != "core_agent":
+            return "- (knowledge meta not exposed for this role)"
+
+        catalog_path = self.runtime_knowledge_root / "index" / "catalog.json"
+        if not catalog_path.exists():
+            return "- (no knowledge docs found)"
+        try:
+            raw = json.loads(catalog_path.read_text(encoding="utf-8"))
+        except Exception:
+            return "- (no knowledge docs found)"
+        if not isinstance(raw, list):
+            return "- (no knowledge docs found)"
+
+        rows: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            doc_id = str(item.get("doc_id", "")).strip()
+            if not doc_id:
+                continue
+            title = str(item.get("title", "")).strip() or doc_id
+            path = str(item.get("path", "")).strip() or f"knowledge/docs/{doc_id}.md"
+            tags = self._normalize_tags(item.get("tags", []))
+            row = {
+                "doc_id": doc_id,
+                "title": title,
+                "path": path,
+                "tags": tags,
+                "quality_score": float(item.get("quality_score", 0.0) or 0.0),
+                "confidence": float(item.get("confidence", 0.0) or 0.0),
+            }
+            rows.append(row)
+
+        rows.sort(key=lambda item: str(item.get("doc_id", "")))
+        rows = rows[: max(1, int(limit))]
+        if not rows:
+            return "- (no knowledge docs found)"
+        return "\n".join("- " + json.dumps(row, ensure_ascii=True) for row in rows)
+
     def _get_system_prompt(self, role: str) -> str:
         role = str(role).strip()
         if role == "workflow_summarizer":
@@ -229,12 +280,22 @@ class PromptEngine:
             skills_lines.append("- (no skills found)")
         skills_section = "\n".join(skills_lines)
 
+        knowledge_lines = [f"Below is the available knowledge metadata:"]
+        knowledge_text = self._load_knowledge_meta_text(role)
+        if knowledge_text:
+            knowledge_lines.append(knowledge_text)
+        else:
+            knowledge_lines.append("- (no knowledge docs found)")
+        knowledge_section = "\n".join(knowledge_lines)
+
         text = selected.strip()
         if self._AGENT_ROLES_PLACEHOLDER in text:
             text = text.replace(self._AGENT_ROLES_PLACEHOLDER, roles_section)
 
         if self._SKILLS_META_PLACEHOLDER in text:
             text = text.replace(self._SKILLS_META_PLACEHOLDER, skills_section)
+        if self._KNOWLEDGE_META_PLACEHOLDER in text:
+            text = text.replace(self._KNOWLEDGE_META_PLACEHOLDER, knowledge_section)
         if self._RUNTIME_WORKSPACE_PLACEHOLDER in text:
             text = text.replace(self._RUNTIME_WORKSPACE_PLACEHOLDER, str(self.workspace))
         return text

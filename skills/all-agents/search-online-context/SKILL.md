@@ -68,15 +68,14 @@ Follow-up sub-link/domain round example:
 
 The script prints one JSON object:
 
+- `executed_skill`: `search-online-context`
+- `status`: `ok|error`
 - `query`: search query
-- `searxng_base_url`: SearXNG endpoint used
-- `search_results`: list of `{rank,title,url}`
-- `fetched_context`: list of `{rank,title,url,status,context,error}`
-- `errors`: list of error strings
+- `fetched_context`: one concatenated string with fetched contexts
 
 # Notes
 
 - Ensure SearXNG is running (from your log: `http://127.0.0.1:8888`).
-- If network access fails, report `errors` and continue with best effort.
+- If network access fails, script returns `status=error` and error text inside `fetched_context`.
 - Prefer quoting user query exactly and keep `--fetch` small (2-5) for speed.
 - Prefer iterative refinement: broad query first, then targeted sub-link/domain queries.

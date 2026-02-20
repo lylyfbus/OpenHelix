@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+_EXECUTED_SKILL = "documentation-distillation"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
 
 def _parse_tags(raw: str) -> list[str]:
     return [item.strip() for item in str(raw).split(",") if item.strip()]
@@ -47,27 +48,19 @@ def _build_body(args: argparse.Namespace) -> str:
     return "\n\n".join(parts)
 
 
-def _ok(action: str, doc_id: str, doc_path: str, summary: str, next_step: str, details: dict[str, Any]) -> dict[str, Any]:
+def _ok(doc_path: str) -> dict[str, Any]:
     return {
+        "executed_skill": _EXECUTED_SKILL,
         "status": "ok",
-        "action": action,
-        "doc_id": doc_id,
         "doc_path": doc_path,
-        "summary": summary,
-        "next_step": next_step,
-        "details": details,
     }
 
 
-def _err(action: str, doc_id: str, summary: str, details: dict[str, Any], next_step: str = "review_inputs") -> dict[str, Any]:
+def _err(doc_path: str = "") -> dict[str, Any]:
     return {
+        "executed_skill": _EXECUTED_SKILL,
         "status": "error",
-        "action": action,
-        "doc_id": doc_id,
-        "doc_path": "",
-        "summary": summary,
-        "next_step": next_step,
-        "details": details,
+        "doc_path": doc_path,
     }
 
 
@@ -142,11 +135,11 @@ def _read_existing_doc(docs_root: Path, catalog_rows: list[dict[str, Any]], doc_
 def run_create(workspace: Path, args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     title = str(args.title).strip()
     if not title:
-        return _err("create", "", "missing title", {}), 1
+        return _err(), 1
 
     body = str(args.body).strip() if str(args.body).strip() else _build_body(args)
     if not body:
-        return _err("create", "", "missing content", {}), 1
+        return _err(), 1
 
     tags = _parse_tags(args.tags)
     docs_root, _index_root, catalog_path = _knowledge_paths(workspace)
@@ -161,36 +154,28 @@ def run_create(workspace: Path, args: argparse.Namespace) -> tuple[dict[str, Any
     entry = {
         "doc_id": doc_id,
         "title": title,
+        "path": str(doc_path.relative_to(workspace)),
+        "tags": tags,
         "quality_score": float(args.quality_score),
         "confidence": float(args.confidence),
+        "updated_at": _now_iso(),
     }
     _upsert_catalog_entry(catalog_rows, entry)
     _save_catalog(catalog_path, catalog_rows)
 
-    result = _ok(
-        action="create",
-        doc_id=doc_id,
-        doc_path=str(doc_path),
-        summary="knowledge document created",
-        next_step="continue_reasoning",
-        details={
-            "tags": tags,
-            "created_at": _now_iso(),
-        },
-    )
-    return result, 0
+    return _ok(doc_path=str(doc_path)), 0
 
 
 def run_update(workspace: Path, args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     doc_id = str(args.doc_id).strip()
     if not doc_id:
-        return _err("update", "", "missing doc_id", {}), 1
+        return _err(), 1
 
     docs_root, _index_root, catalog_path = _knowledge_paths(workspace)
     catalog_rows = _load_catalog(catalog_path)
     existing = _read_existing_doc(docs_root, catalog_rows, doc_id)
     if existing is None:
-        return _err("update", doc_id, "doc not found", {}), 1
+        return _err(), 1
 
     current_title = str(existing.get("title", "")).strip() or "Untitled"
     current_text = str(existing.get("text", ""))
@@ -217,35 +202,37 @@ def run_update(workspace: Path, args: argparse.Namespace) -> tuple[dict[str, Any
 
         if patch_parts:
             next_body = (
-                f"{current_body}\n\n## Update ({_now_iso()})\n\n"
+                f"{current_body}\n\n## Update\n\n"
                 + "\n\n".join(patch_parts)
             ).strip()
         else:
-            return _err("update", doc_id, "no update fields provided", {}), 1
+            return _err(), 1
 
     doc_path = _doc_path(docs_root, doc_id)
     doc_path.write_text(f"# {next_title}\n\n{next_body}\n", encoding="utf-8")
 
+    current_row = _get_catalog_entry(catalog_rows, doc_id)
+    next_tags = _parse_tags(args.tags)
+    if not next_tags:
+        existing_tags = current_row.get("tags", [])
+        if isinstance(existing_tags, list):
+            next_tags = [str(tag).strip() for tag in existing_tags if str(tag).strip()]
+        elif isinstance(existing_tags, str):
+            next_tags = [item.strip() for item in existing_tags.split(",") if item.strip()]
+
     entry = {
         "doc_id": doc_id,
         "title": next_title,
+        "path": str(doc_path.relative_to(workspace)),
+        "tags": next_tags,
         "quality_score": float(args.quality_score),
         "confidence": float(args.confidence),
+        "updated_at": _now_iso(),
     }
     _upsert_catalog_entry(catalog_rows, entry)
     _save_catalog(catalog_path, catalog_rows)
 
-    result = _ok(
-        action="update",
-        doc_id=doc_id,
-        doc_path=str(doc_path),
-        summary="knowledge document updated",
-        next_step="continue_reasoning",
-        details={
-            "updated_at": _now_iso(),
-        },
-    )
-    return result, 0
+    return _ok(doc_path=str(doc_path)), 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -278,10 +265,10 @@ def main() -> int:
             out, code = run_update(workspace, args)
         print(json.dumps(out, ensure_ascii=True))
         return code
-    except Exception as exc:
-        out = _err(action, str(args.doc_id).strip(), "unexpected failure", {"error_type": exc.__class__.__name__}, "retry_or_fix_script")
+    except Exception:
+        out = _err()
         print(json.dumps(out, ensure_ascii=True))
-        print(f"unexpected error: {exc}", file=sys.stderr)
+        print("unexpected error", file=sys.stderr)
         return 2
 
 

@@ -76,12 +76,8 @@ Update example:
 
 ```json
 {
+  "executed_skill": "documentation-distillation",
   "status": "ok|error",
-  "action": "create|update",
-  "doc_id": "...",
-  "doc_path": "...",
-  "summary": "...",
-  "next_step": "...",
-  "details": {}
+  "doc_path": "..."
 }
 ```
