@@ -16,7 +16,27 @@ class ModelResponse:
     text: str
 
 
-def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: int = 60) -> dict[str, Any]:
+def _first_env_value(keys: tuple[str, ...], default: str = "") -> str:
+    for key in keys:
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return default
+
+
+def _first_int_env_value(keys: tuple[str, ...], default: int) -> int:
+    for key in keys:
+        value = os.getenv(key, "").strip()
+        if not value:
+            continue
+        try:
+            return int(value)
+        except ValueError:
+            continue
+    return int(default)
+
+
+def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: int = 300) -> dict[str, Any]:
     req = Request(
         url=url,
         method="POST",
@@ -39,7 +59,7 @@ class OllamaAdapter:
     def __init__(self) -> None:
         base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
         self.endpoint = f"{base}/api/generate"
-        self.timeout_seconds = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
+        self.timeout_seconds = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
         keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "").strip()
         self.keep_alive = keep_alive or None
 
@@ -96,17 +116,26 @@ class OllamaAdapter:
             raise RuntimeError(f"Network error: {exc}") from exc
 
 
-class LMStudioAdapter:
-    provider = "lmstudio"
+class OpenAICompatibleAdapter:
+    def __init__(
+        self,
+        *,
+        provider: str,
+        base_url_env_keys: tuple[str, ...],
+        default_base_url: str,
+        api_key_env_keys: tuple[str, ...],
+        timeout_env_keys: tuple[str, ...],
+        default_timeout_seconds: int = 300,
+    ) -> None:
+        self.provider = str(provider).strip().lower() or "openai_compatible"
 
-    def __init__(self) -> None:
-        raw_base = os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1").strip()
+        raw_base = _first_env_value(base_url_env_keys, default_base_url).strip()
         base = raw_base.rstrip("/")
         if not re.search(r"/v\d+$", base):
             base = f"{base}/v1"
         self.endpoint = f"{base}/chat/completions"
-        self.timeout_seconds = int(os.getenv("LMSTUDIO_TIMEOUT_SECONDS", "60"))
-        self.api_token = os.getenv("LMSTUDIO_API_KEY", "").strip() or os.getenv("LM_API_TOKEN", "").strip()
+        self.timeout_seconds = _first_int_env_value(timeout_env_keys, default_timeout_seconds)
+        self.api_token = _first_env_value(api_key_env_keys, "")
 
     @staticmethod
     def _content_to_text(content: Any) -> str:
@@ -217,7 +246,12 @@ class LMStudioAdapter:
 class ModelRouter:
     def __init__(self, provider: str = "ollama", model_name: str | None = None) -> None:
         provider_name = str(provider).strip().lower() or "ollama"
+        if provider_name in {"openai-compatible", "openaicompat"}:
+            provider_name = "openai_compatible"
+        if provider_name == "z.ai":
+            provider_name = "zai"
         self.provider = provider_name
+
         if provider_name == "ollama":
             self.adapter = OllamaAdapter()
             core_model = model_name or os.getenv(
@@ -226,15 +260,49 @@ class ModelRouter:
             )
             summarizer_model = os.getenv("OLLAMA_MODEL_WORKFLOW_SUMMARIZER", core_model)
         elif provider_name == "lmstudio":
-            self.adapter = LMStudioAdapter()
+            self.adapter = OpenAICompatibleAdapter(
+                provider="lmstudio",
+                base_url_env_keys=("LMSTUDIO_BASE_URL", "OPENAI_COMPAT_BASE_URL"),
+                default_base_url="http://localhost:1234/v1",
+                api_key_env_keys=("LMSTUDIO_API_KEY", "LM_API_TOKEN", "OPENAI_COMPAT_API_KEY"),
+                timeout_env_keys=("LMSTUDIO_TIMEOUT_SECONDS", "OPENAI_COMPAT_TIMEOUT_SECONDS"),
+            )
             core_model = model_name or os.getenv(
                 "LMSTUDIO_MODEL_CORE_AGENT",
                 os.getenv("LMSTUDIO_MODEL_THINKING", "local-model"),
             )
             summarizer_model = os.getenv("LMSTUDIO_MODEL_WORKFLOW_SUMMARIZER", core_model)
+        elif provider_name == "zai":
+            self.adapter = OpenAICompatibleAdapter(
+                provider="zai",
+                base_url_env_keys=("ZAI_BASE_URL", "OPENAI_COMPAT_BASE_URL", "LMSTUDIO_BASE_URL"),
+                default_base_url="https://api.z.ai/api/paas/v4",
+                api_key_env_keys=("ZAI_API_KEY", "OPENAI_COMPAT_API_KEY", "LMSTUDIO_API_KEY", "LM_API_TOKEN"),
+                timeout_env_keys=("ZAI_TIMEOUT_SECONDS", "OPENAI_COMPAT_TIMEOUT_SECONDS", "LMSTUDIO_TIMEOUT_SECONDS"),
+            )
+            core_model = model_name or os.getenv(
+                "ZAI_MODEL_CORE_AGENT",
+                os.getenv("ZAI_MODEL_THINKING", "glm-5"),
+            )
+            summarizer_model = os.getenv("ZAI_MODEL_WORKFLOW_SUMMARIZER", core_model)
+        elif provider_name == "openai_compatible":
+            self.adapter = OpenAICompatibleAdapter(
+                provider="openai_compatible",
+                base_url_env_keys=("OPENAI_COMPAT_BASE_URL",),
+                default_base_url="http://localhost:1234/v1",
+                api_key_env_keys=("OPENAI_COMPAT_API_KEY", "LM_API_TOKEN"),
+                timeout_env_keys=("OPENAI_COMPAT_TIMEOUT_SECONDS",),
+            )
+            core_model = model_name or os.getenv(
+                "OPENAI_COMPAT_MODEL_CORE_AGENT",
+                os.getenv("OPENAI_COMPAT_MODEL_THINKING", "local-model"),
+            )
+            summarizer_model = os.getenv("OPENAI_COMPAT_MODEL_WORKFLOW_SUMMARIZER", core_model)
         else:
             raise NotImplementedError(
-                f"Provider '{provider_name}' is not implemented yet. Use --provider ollama or --provider lmstudio."
+                "Provider "
+                f"'{provider_name}' is not implemented yet. "
+                "Use --provider ollama, lmstudio, zai, or openai_compatible."
             )
         self.models: dict[str, str] = {
             "core_agent": core_model,

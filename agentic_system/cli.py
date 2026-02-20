@@ -11,8 +11,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider",
         default="ollama",
-        choices=["ollama", "lmstudio", "openai", "claude"],
-        help="LLM provider. Currently implemented: ollama, lmstudio.",
+        choices=["ollama", "lmstudio", "zai", "openai_compatible"],
+        help="LLM provider. Implemented: ollama, lmstudio, zai, openai_compatible.",
     )
     parser.add_argument(
         "--mode",
@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-name",
         default=None,
-        help="Provider model name override (for ollama/lmstudio).",
+        help="Provider model name override.",
     )
     return parser
 
