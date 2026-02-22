@@ -30,7 +30,7 @@ class AgentRuntime:
         if session_id is not None:
             self.state.load_state()
         self.model_router = ModelRouter(provider=self.provider, model_name=model_name)
-        self.prompt_engine = PromptEngine(workspace=self.workspace, token_window_limit=int(128000 * 0.7), compact_keep_last_k=10)
+        self.prompt_engine = PromptEngine(workspace=self.workspace, token_window_limit=int(200000 * 0.7), compact_keep_last_k=10)
         self.engine = FlowEngine(
             workspace=self.workspace,
             mode=self.mode,
