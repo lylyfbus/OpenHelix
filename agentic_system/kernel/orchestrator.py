@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import select
 import shlex
+import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
-from .executors import execute
+from .executors import ExecJob, collect_exec_job_result, start_exec_job, terminate_exec_job
 from .model_router import ModelRouter
 from .prompts import PromptEngine
 from .storage import StorageEngine
@@ -105,6 +109,12 @@ class FlowEngine:
             lines.extend(self._format_exec_value_lines("stderr", str(exec_result)))
             return "\n".join(lines)
         lines = []
+        job_id = str(exec_result.get("job_id", "")).strip()
+        status = str(exec_result.get("status", "")).strip()
+        if job_id:
+            lines.append(f"- job_id: {job_id}")
+        if status:
+            lines.append(f"- status: {status}")
         lines.extend(self._format_exec_value_lines("stdout", exec_result.get("stdout", "")))
         lines.extend(self._format_exec_value_lines("stderr", exec_result.get("stderr", "")))
         return "\n".join(lines)
@@ -118,10 +128,10 @@ class FlowEngine:
     ) -> str:
         action_name = str(action or "").strip().lower() or "unknown"
         payload = dict(action_input) if isinstance(action_input, dict) else {}
-        prefix = f"[{state.utc_now_iso()}] core_agent"
+        prefix = f"[{state.utc_now_iso()}] core_agent> : "
         indent = " " * len(prefix)
         lines: list[str] = [
-            f"{prefix}> {raw_response}",
+            str(raw_response or ""),
             f"{indent}> next_action: {action_name}",
         ]
         if payload:
@@ -189,6 +199,193 @@ class FlowEngine:
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _build_exec_cancel_note(job_id: str, reason: str, signals: list[str]) -> str:
+        signal_text = " -> ".join(signals) if signals else "none"
+        return "\n".join(
+            [
+                f"[runtime] exec terminated by requester ({reason})",
+                f"[runtime] job_id={job_id}",
+                f"[runtime] signals={signal_text}",
+            ]
+        )
+
+    def _cancel_running_jobs(
+        self,
+        *,
+        running_jobs: dict[str, ExecJob],
+        status_by_job: dict[str, str],
+        stderr_notes_by_job: dict[str, str],
+        reason: str,
+    ) -> None:
+        for job_id in list(running_jobs.keys()):
+            job = running_jobs.get(job_id)
+            if job is None:
+                continue
+            try:
+                cancel_meta = terminate_exec_job(job, reason=reason)
+                signals = [str(item) for item in cancel_meta.get("signals", [])]
+            except Exception as exc:
+                signals = []
+                stderr_notes_by_job[job_id] = (
+                    self._build_exec_cancel_note(job_id=job_id, reason=reason, signals=signals)
+                    + f"\n[runtime] cancellation error: {exc}"
+                )
+            else:
+                stderr_notes_by_job[job_id] = self._build_exec_cancel_note(
+                    job_id=job_id,
+                    reason=reason,
+                    signals=signals,
+                )
+            status_by_job[job_id] = "cancelled"
+
+    def _wait_for_exec_jobs(self, jobs: list[ExecJob]) -> list[dict[str, str]]:
+        if not jobs:
+            return []
+
+        jobs_by_id = {job.job_id: job for job in jobs}
+        running_jobs: dict[str, ExecJob] = dict(jobs_by_id)
+        status_by_job: dict[str, str] = {job.job_id: "running" for job in jobs}
+        stderr_notes_by_job: dict[str, str] = {}
+        spinner = ["|", "/", "-", "\\"]
+        spinner_index = 0
+        has_status_line = False
+        last_status_at = 0.0
+
+        while running_jobs:
+            now = time.time()
+            if now - last_status_at >= 0.25:
+                marker = spinner[spinner_index % len(spinner)]
+                spinner_index += 1
+                ids = ", ".join(running_jobs.keys())
+                print(
+                    f"\rruntime> [{marker}] exec running job_ids={ids} (Ctrl+C to cancel all, /cancel <job_id>)",
+                    end="",
+                    flush=True,
+                )
+                has_status_line = True
+                last_status_at = now
+
+            done_ids = [job_id for job_id, job in running_jobs.items() if job.process.poll() is not None]
+            for job_id in done_ids:
+                job = running_jobs.pop(job_id)
+                if status_by_job.get(job_id) != "cancelled":
+                    return_code = int(job.process.returncode or 0)
+                    status_by_job[job_id] = "completed" if return_code == 0 else "failed"
+
+            if not running_jobs:
+                break
+
+            try:
+                readable, _, _ = select.select([sys.stdin], [], [], 0.25)
+            except KeyboardInterrupt:
+                if has_status_line:
+                    print()
+                    has_status_line = False
+                self._cancel_running_jobs(
+                    running_jobs=running_jobs,
+                    status_by_job=status_by_job,
+                    stderr_notes_by_job=stderr_notes_by_job,
+                    reason="Ctrl+C",
+                )
+                continue
+            except (OSError, ValueError):
+                time.sleep(0.25)
+                continue
+
+            if not readable:
+                continue
+
+            line = sys.stdin.readline()
+            command = str(line or "").strip()
+            if not command:
+                time.sleep(0.05)
+                continue
+
+            if command.startswith("/cancel"):
+                if has_status_line:
+                    print()
+                    has_status_line = False
+                parts = command.split(maxsplit=1)
+                if len(parts) == 1:
+                    self._cancel_running_jobs(
+                        running_jobs=running_jobs,
+                        status_by_job=status_by_job,
+                        stderr_notes_by_job=stderr_notes_by_job,
+                        reason="/cancel",
+                    )
+                    continue
+
+                target_job_id = parts[1].strip()
+                if target_job_id.lower() == "all":
+                    self._cancel_running_jobs(
+                        running_jobs=running_jobs,
+                        status_by_job=status_by_job,
+                        stderr_notes_by_job=stderr_notes_by_job,
+                        reason="/cancel",
+                    )
+                    continue
+
+                target_job = running_jobs.get(target_job_id)
+                if target_job is None:
+                    print(f"runtime> unknown job_id for /cancel: {target_job_id}")
+                    continue
+
+                try:
+                    cancel_meta = terminate_exec_job(target_job, reason="/cancel")
+                    signals = [str(item) for item in cancel_meta.get("signals", [])]
+                    stderr_notes_by_job[target_job_id] = self._build_exec_cancel_note(
+                        job_id=target_job_id,
+                        reason="/cancel",
+                        signals=signals,
+                    )
+                except Exception as exc:
+                    stderr_notes_by_job[target_job_id] = (
+                        self._build_exec_cancel_note(
+                            job_id=target_job_id,
+                            reason="/cancel",
+                            signals=[],
+                        )
+                        + f"\n[runtime] cancellation error: {exc}"
+                    )
+                status_by_job[target_job_id] = "cancelled"
+                print(f"runtime> cancellation requested for job_id={target_job_id}")
+                continue
+
+            if has_status_line:
+                print()
+                has_status_line = False
+            print("runtime> exec jobs are running; use /cancel <job_id> or Ctrl+C.")
+
+        if has_status_line:
+            print()
+
+        out: list[dict[str, str]] = []
+        for job in jobs:
+            job_id = job.job_id
+            stderr_append = stderr_notes_by_job.get(job_id, "")
+            try:
+                result = collect_exec_job_result(job, stderr_append=stderr_append)
+            except Exception as exc:
+                result = {
+                    "stdout": "",
+                    "stderr": f"[runtime] failed to collect exec output: {exc}",
+                    "return_code": 1,
+                }
+            status = status_by_job.get(job_id, "running")
+            if status == "running":
+                return_code = int(result.get("return_code", 0) or 0)
+                status = "completed" if return_code == 0 else "failed"
+            out.append(
+                {
+                    "job_id": job_id,
+                    "status": status,
+                    "stdout": str(result.get("stdout", "")),
+                    "stderr": str(result.get("stderr", "")),
+                }
+            )
+        return out
 
     @staticmethod
     def _normalize_llm_response(response: Any) -> tuple[str, str, dict[str, Any]]:
@@ -300,18 +497,28 @@ class FlowEngine:
                         state.save_state()
                         break
                     try:
-                        exec_result = execute(
+                        job_id = f"job_{uuid4().hex[:8]}"
+                        job = start_exec_job(
                             action_input=action_input,
                             workspace=self.workspace,
-                        )
-                        exec_text = self._format_exec_result_text(exec_result)
-                        state.update_state(
-                            role="runtime",
-                            text=exec_text,
+                            job_id=job_id,
                         )
                         print()
-                        print(f"runtime> {exec_text}")
-                        state.save_state()
+                        print(
+                            "runtime> [exec started] "
+                            f"job_id={job_id} (Ctrl+C to cancel all, /cancel {job_id} to cancel this job)"
+                        )
+
+                        exec_results = self._wait_for_exec_jobs([job])
+                        for exec_result in exec_results:
+                            exec_text = self._format_exec_result_text(exec_result)
+                            state.update_state(
+                                role="runtime",
+                                text=exec_text,
+                            )
+                            print()
+                            print(f"runtime> {exec_text}")
+                            state.save_state()
 
                     except Exception as exc:
                         state.update_state(
