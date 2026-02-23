@@ -332,24 +332,24 @@ class ModelRouter:
         return self.models["core_agent"]
 
     @staticmethod
-    def _parse_json_payload(text: str) -> dict[str, Any] | None:
+    def _parse_json_payload_with_error(text: str) -> tuple[dict[str, Any] | None, str]:
         raw = text.strip()
         if not raw:
-            return None
+            return None, "empty model output"
 
         match = re.search(r"<output>(.*?)</output>", raw, flags=re.IGNORECASE | re.DOTALL)
         if not match:
-            return None
+            return None, "missing <output>...</output> block"
         block = match.group(1).strip()
         if not block:
-            return None
+            return None, "empty <output> block"
         try:
             parsed = json.loads(block)
-        except json.JSONDecodeError:
-            return None
+        except json.JSONDecodeError as exc:
+            return None, f"invalid JSON in <output> ({exc.msg} at line {exc.lineno}, column {exc.colno})"
         if isinstance(parsed, dict):
-            return parsed
-        return None
+            return parsed, ""
+        return None, "<output> JSON must be an object"
 
     @staticmethod
     def _stream_raw_response_from_chunk_factory(
@@ -478,15 +478,27 @@ class ModelRouter:
             stream=True,
             chunk_callback=chunk_callback,
         )
-        payload = self._parse_json_payload(response.text or "")
+        payload, parse_error = self._parse_json_payload_with_error(response.text or "")
         if isinstance(payload, dict):
+            payload["_parse_ok"] = True
+            payload["_parse_error"] = ""
             if not str(payload.get("raw_response", "")).strip() and streamed_raw_response_parts:
                 payload["raw_response"] = "".join(streamed_raw_response_parts)
             return payload
+        base_payload = {
+            "_parse_ok": False,
+            "_parse_error": parse_error,
+        }
         if streamed_raw_response_parts:
             return {
+                **base_payload,
                 "raw_response": "".join(streamed_raw_response_parts),
                 "action": "none",
                 "action_input": {},
             }
-        return {}
+        return {
+            **base_payload,
+            "raw_response": "",
+            "action": "none",
+            "action_input": {},
+        }

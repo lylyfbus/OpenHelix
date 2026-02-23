@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import select
-import re
 import shlex
 import sys
 import time
@@ -19,6 +18,7 @@ from .storage import StorageEngine
 DEFAULT_LIMITS = {
     "max_inner_turns": 60,
     "max_invalid_action_retries": 3,
+    "max_invalid_output_retries": 3,
 }
 
 
@@ -153,22 +153,6 @@ class FlowEngine:
         lines.extend(self._format_exec_value_lines("stdout", exec_result.get("stdout", "")))
         lines.extend(self._format_exec_value_lines("stderr", exec_result.get("stderr", "")))
         return lines
-
-    @staticmethod
-    def _sanitize_core_agent_raw_response(raw_response: str) -> str:
-        text = str(raw_response or "")
-        if not text:
-            return ""
-        lines = text.splitlines()
-        first = lines[0]
-        first = re.sub(
-            r"^\[\d{4}-\d{2}-\d{2}T[^\]]+\]\s+[a-zA-Z0-9_\-]+>\s*:?\s*",
-            "",
-            first,
-        )
-        first = re.sub(r"^[a-zA-Z0-9_\-]+>\s*:?\s*", "", first)
-        lines[0] = first
-        return "\n".join(lines)
 
     @staticmethod
     def _format_history_record(state: StorageEngine, role: str, text: str) -> str:
@@ -455,29 +439,153 @@ class FlowEngine:
         action_input = dict(action_input_raw) if isinstance(action_input_raw, dict) else {}
         return raw_response, action, action_input
 
-    def _build_stream_printer(self, role: str) -> tuple[Callable[[str], None], Callable[[str], None]]:
-        role_name = str(role).strip() or "assistant"
-        started = {"value": False}
+    def _build_stream_printer(self) -> tuple[Callable[[str], None], Callable[[], str]]:
+        emitted_parts: list[str] = []
 
         def on_token(token: str) -> None:
             if not token:
                 return
-            if not started["value"]:
-                print()
-                print(f"{role_name}> ", end="", flush=True)
-                started["value"] = True
             print(token, end="", flush=True)
+            emitted_parts.append(token)
 
-        def finish(raw_response: str) -> None:
-            if started["value"]:
-                print()
-                return
-            text = str(raw_response or "").strip()
-            if text:
-                print()
-                print(f"{role_name}> {text}")
+        def finish() -> str:
+            print()
+            return "".join(emitted_parts)
 
         return on_token, finish
+
+    @staticmethod
+    def _validate_exec_action_input(action_input: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        code_type = str(action_input.get("code_type", "")).strip().lower()
+        if code_type not in {"bash", "python"}:
+            errors.append("exec action_input.code_type must be \"bash\" or \"python\"")
+        script_path = str(action_input.get("script_path", "")).strip()
+        script = str(action_input.get("script", "")).strip()
+        has_script_path = bool(script_path)
+        has_script = bool(script)
+        if has_script_path == has_script:
+            errors.append("exec action_input must include exactly one of script_path or script")
+        raw_args = action_input.get("script_args", [])
+        has_script_args = False
+        if isinstance(raw_args, str):
+            has_script_args = bool(raw_args.strip())
+        elif isinstance(raw_args, (list, tuple)):
+            has_script_args = any(str(item).strip() for item in raw_args)
+        elif raw_args not in (None, {}):
+            has_script_args = True
+        if has_script and has_script_args:
+            errors.append("exec action_input.script_args is only allowed when script_path is used")
+        return errors
+
+    def _validate_core_agent_output_contract(self, response: Any, streamed_raw_response: str) -> list[str]:
+        errors: list[str] = []
+        if not isinstance(response, dict):
+            return ["model_router.generate returned non-object response"]
+
+        parse_ok = bool(response.get("_parse_ok", False))
+        parse_error = str(response.get("_parse_error", "")).strip()
+        if not parse_ok:
+            if parse_error:
+                errors.append(parse_error)
+            else:
+                errors.append("failed to parse model output")
+            return errors
+
+        raw_response = response.get("raw_response", "")
+        if not isinstance(raw_response, str) or not raw_response.strip():
+            errors.append("raw_response must be a non-empty string")
+        if not str(streamed_raw_response).strip():
+            errors.append("raw_response was not streamable to UI")
+
+        action = str(response.get("action", "")).strip().lower()
+        allowed_actions = {"chat_with_requester", "keep_reasoning", "exec"}
+        if action not in allowed_actions:
+            errors.append("action must be one of chat_with_requester, keep_reasoning, exec")
+
+        action_input = response.get("action_input")
+        if not isinstance(action_input, dict):
+            errors.append("action_input must be an object")
+            return errors
+
+        if action in {"chat_with_requester", "keep_reasoning"}:
+            if action_input:
+                errors.append(f"action_input must be {{}} when action is {action}")
+        elif action == "exec":
+            errors.extend(self._validate_exec_action_input(action_input))
+        return errors
+
+    def _generate_valid_core_agent_turn(
+        self,
+        *,
+        state: StorageEngine,
+        model_router: ModelRouter,
+        prompt_engine: PromptEngine,
+    ) -> tuple[str, dict[str, Any], bool]:
+        max_invalid_output_retries = int(self.limits.get("max_invalid_output_retries", 3))
+        for _ in range(max_invalid_output_retries):
+            self._ensure_runtime_fields(state)
+            final_prompt = prompt_engine.build_prompt(
+                role="core_agent",
+                state=state,
+                model_router=model_router,
+            )
+            self.last_core_agent_prompt = final_prompt
+            print()
+            print("core_agent> ", end="", flush=True)
+            on_chunk, finish_stream = self._build_stream_printer()
+            response = model_router.generate(
+                role="core_agent",
+                final_prompt=final_prompt,
+                raw_response_callback=on_chunk,
+            )
+            streamed_raw_response = finish_stream()
+            contract_errors = self._validate_core_agent_output_contract(response, streamed_raw_response)
+            if contract_errors:
+                runtime_note = (
+                    "invalid core_agent output contract: "
+                    + "; ".join(contract_errors)
+                    + '. Regenerate with <output>{"raw_response":"...","action":"chat_with_requester|keep_reasoning|exec","action_input":{}}</output>.'
+                )
+                state.update_state(
+                    text=self._format_history_record(
+                        state=state,
+                        role="runtime",
+                        text=runtime_note,
+                    ),
+                )
+                print()
+                print(f"runtime> {runtime_note}")
+                state.save_state()
+                continue
+            raw_response, action, action_input = self._normalize_llm_response(response)
+            _ = raw_response
+            state.append_action(role="core_agent", action=action, action_input=action_input)
+            state.update_state(
+                text=self._format_core_agent_record(
+                    state=state,
+                    raw_response=streamed_raw_response,
+                    action=action,
+                    action_input=action_input,
+                ),
+            )
+            state.save_state()
+            return action, action_input, True
+
+        stop_reason = (
+            f"max invalid output retries reached ({max_invalid_output_retries}); ending current loop"
+        )
+        state.update_state(
+            text=self._format_history_record(
+                state=state,
+                role="runtime",
+                text=stop_reason,
+            ),
+        )
+        print()
+        print(f"runtime> {stop_reason}")
+        state.save_state()
+        return "chat_with_requester", {}, False
 
     def _run_core_agent_loop(
         self,
@@ -493,33 +601,13 @@ class FlowEngine:
         turns = 0
         invalid_action_retries = 0
 
-        self._ensure_runtime_fields(state)
-        final_prompt = prompt_engine.build_prompt(
-            role="core_agent",
+        action, action_input, ok = self._generate_valid_core_agent_turn(
             state=state,
             model_router=model_router,
+            prompt_engine=prompt_engine,
         )
-        self.last_core_agent_prompt = final_prompt
-        on_chunk, finish_stream = self._build_stream_printer("core_agent")
-
-        response = model_router.generate(
-            role="core_agent",
-            final_prompt=final_prompt,
-            raw_response_callback=on_chunk,
-        )
-        raw_response, action, action_input = self._normalize_llm_response(response)
-        clean_raw_response = self._sanitize_core_agent_raw_response(raw_response)
-        state.append_action(role="core_agent", action=action, action_input=action_input)
-        finish_stream(clean_raw_response)
-        state.update_state(
-            text=self._format_core_agent_record(
-                state=state,
-                raw_response=clean_raw_response,
-                action=action,
-                action_input=action_input,
-            ),
-        )
-        state.save_state()
+        if not ok:
+            return
 
         while turns < max_turns:
             turns += 1
@@ -651,33 +739,13 @@ class FlowEngine:
                     state.save_state()
                     break
 
-            self._ensure_runtime_fields(state)
-            final_prompt = prompt_engine.build_prompt(
-                role="core_agent",
+            action, action_input, ok = self._generate_valid_core_agent_turn(
                 state=state,
                 model_router=model_router,
+                prompt_engine=prompt_engine,
             )
-            self.last_core_agent_prompt = final_prompt
-            on_chunk, finish_stream = self._build_stream_printer("core_agent")
-
-            response = model_router.generate(
-                role="core_agent",
-                final_prompt=final_prompt,
-                raw_response_callback=on_chunk,
-            )
-            raw_response, action, action_input = self._normalize_llm_response(response)
-            clean_raw_response = self._sanitize_core_agent_raw_response(raw_response)
-            state.append_action(role="core_agent", action=action, action_input=action_input)
-            finish_stream(clean_raw_response)
-            state.update_state(
-                text=self._format_core_agent_record(
-                    state=state,
-                    raw_response=clean_raw_response,
-                    action=action,
-                    action_input=action_input,
-                ),
-            )
-            state.save_state()
+            if not ok:
+                return
 
         if turns >= max_turns:
             state.update_state(
