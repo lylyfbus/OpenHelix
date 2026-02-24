@@ -752,7 +752,10 @@ class FlowEngine:
         if model_router is None or prompt_engine is None:
             raise RuntimeError("FlowEngine requires model_router and prompt_engine to run")
 
+        first_user_prompt = True
         while True:
+            if not first_user_prompt:
+                print()
             try:
                 line = input("user> ")
             except EOFError:
@@ -761,6 +764,7 @@ class FlowEngine:
             except KeyboardInterrupt:
                 print("\nInterrupted. Use /exit to quit.")
                 continue
+            first_user_prompt = False
 
             stripped = line.strip()
             if not stripped:
