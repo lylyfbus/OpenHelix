@@ -55,6 +55,8 @@ class FlowEngine:
             state.exec_approval_exact = []
         if not isinstance(getattr(state, "exec_approval_pattern", None), list):
             state.exec_approval_pattern = []
+        if not isinstance(getattr(state, "exec_approval_path", None), list):
+            state.exec_approval_path = []
 
     @staticmethod
     def _normalize_script_args(raw_script_args: Any) -> list[str]:
@@ -92,6 +94,13 @@ class FlowEngine:
             return f"exec|{code_type}|script_path|{script_path}"
         compact_inline = " ".join(script.split())[:240]
         return f"exec|{code_type}|inline|{compact_inline}"
+
+    def _build_exec_path_signature(self, action_input: dict[str, Any]) -> str:
+        code_type = str(action_input.get("code_type", "bash")).strip().lower() or "bash"
+        script_path = str(action_input.get("script_path", "")).strip()
+        if not script_path:
+            return ""
+        return f"exec|{code_type}|script_path|{script_path}"
 
     @staticmethod
     def _format_exec_value_lines(label: str, value: Any) -> list[str]:
@@ -217,9 +226,12 @@ class FlowEngine:
             return True
         exact_signature = self._build_exec_exact_signature(action_input)
         pattern_signature = self._build_exec_pattern_signature(action_input)
+        path_signature = self._build_exec_path_signature(action_input)
         if exact_signature in state.exec_approval_exact:
             return True
         if pattern_signature in state.exec_approval_pattern:
+            return True
+        if path_signature and path_signature in state.exec_approval_path:
             return True
         if self.approval_handler is None:
             return True
@@ -237,6 +249,9 @@ class FlowEngine:
             elif scope_name in {"pattern", "allow-pattern", "p"}:
                 if pattern_signature not in state.exec_approval_pattern:
                     state.exec_approval_pattern.append(pattern_signature)
+            elif scope_name in {"path", "allow-path", "skill", "k"}:
+                if path_signature and path_signature not in state.exec_approval_path:
+                    state.exec_approval_path.append(path_signature)
             return True
         except Exception:
             return False
@@ -293,18 +308,33 @@ class FlowEngine:
         spinner_index = 0
         has_status_line = False
         last_status_at = 0.0
+        prev_status_len = 0
+
+        def _format_running_ids(ids: list[str]) -> str:
+            if not ids:
+                return "(none)"
+            preview = ids[:3]
+            rendered = ", ".join(preview)
+            remaining = len(ids) - len(preview)
+            if remaining > 0:
+                rendered += f", +{remaining} more"
+            return rendered
 
         while running_jobs:
             now = time.time()
             if now - last_status_at >= 0.25:
                 marker = spinner[spinner_index % len(spinner)]
                 spinner_index += 1
-                ids = ", ".join(running_jobs.keys())
-                print(
-                    f"\rruntime> [{marker}] exec running job_ids={ids} (Ctrl+C to cancel all, /cancel <job_id>)",
-                    end="",
-                    flush=True,
+                ids = list(running_jobs.keys())
+                status_line = (
+                    f"runtime> [{marker}] exec running "
+                    f"jobs={len(ids)} ids={_format_running_ids(ids)}"
                 )
+                pad = ""
+                if prev_status_len > len(status_line):
+                    pad = " " * (prev_status_len - len(status_line))
+                print(f"\r{status_line}{pad}", end="", flush=True)
+                prev_status_len = len(status_line)
                 has_status_line = True
                 last_status_at = now
 
@@ -322,8 +352,11 @@ class FlowEngine:
                 readable, _, _ = select.select([sys.stdin], [], [], 0.25)
             except KeyboardInterrupt:
                 if has_status_line:
+                    if prev_status_len > 0:
+                        print(f"\r{' ' * prev_status_len}\r", end="", flush=True)
                     print()
                     has_status_line = False
+                    prev_status_len = 0
                 self._cancel_running_jobs(
                     running_jobs=running_jobs,
                     status_by_job=status_by_job,
@@ -346,8 +379,11 @@ class FlowEngine:
 
             if command.startswith("/cancel"):
                 if has_status_line:
+                    if prev_status_len > 0:
+                        print(f"\r{' ' * prev_status_len}\r", end="", flush=True)
                     print()
                     has_status_line = False
+                    prev_status_len = 0
                 parts = command.split(maxsplit=1)
                 if len(parts) == 1:
                     self._cancel_running_jobs(
@@ -395,11 +431,16 @@ class FlowEngine:
                 continue
 
             if has_status_line:
+                if prev_status_len > 0:
+                    print(f"\r{' ' * prev_status_len}\r", end="", flush=True)
                 print()
                 has_status_line = False
+                prev_status_len = 0
             print("runtime> exec jobs are running; use /cancel <job_id> or Ctrl+C.")
 
         if has_status_line:
+            if prev_status_len > 0:
+                print(f"\r{' ' * prev_status_len}\r", end="", flush=True)
             print()
 
         out: list[dict[str, str]] = []

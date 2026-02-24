@@ -73,10 +73,11 @@ class AgentRuntime:
         print()
         print("Runtime confirmation required for exec action.")
         print(signature)
-        print("Approve this execution? [y/N/s/p]")
+        print("Approve this execution? [y/N/s/p/k]")
         print("  y: allow once")
         print("  s: allow same exact exec for this session")
         print("  p: allow same script/pattern for this session")
+        print("  k: allow same script_path for this session (ignore args)")
         choice = input("> ").strip().lower()
         if choice in {"y", "yes", "once"}:
             return True, "once"
@@ -84,6 +85,8 @@ class AgentRuntime:
             return True, "session"
         if choice in {"p", "pattern"}:
             return True, "pattern"
+        if choice in {"k", "path", "skill"}:
+            return True, "path"
         return False, "deny"
 
     def _help_text(self) -> str:
@@ -113,6 +116,7 @@ class AgentRuntime:
                 f"action_hist_lines={len(getattr(self.state, 'action_hist', []))}",
                 f"exec_approval_exact={len(getattr(self.state, 'exec_approval_exact', []))}",
                 f"exec_approval_pattern={len(getattr(self.state, 'exec_approval_pattern', []))}",
+                f"exec_approval_path={len(getattr(self.state, 'exec_approval_path', []))}",
             ]
         )
 
