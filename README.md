@@ -14,7 +14,7 @@ agentic_system/
   cli.py
   runtime.py
   kernel/
-    orchestrator.py
+    agent_loop.py
     prompts.py
     model_router.py
     executors.py

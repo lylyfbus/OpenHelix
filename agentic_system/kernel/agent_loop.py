@@ -18,7 +18,6 @@ from .history_utils import (
     build_exec_pattern_signature,
     build_exec_result_lines,
     format_core_agent_record,
-    format_exec_value_lines,
     format_history_block,
     format_history_record,
     format_ui_block,
@@ -75,19 +74,6 @@ class FlowEngine:
         if not isinstance(getattr(state, "exec_auto_write_allowlist", None), list):
             state.exec_auto_write_allowlist = []
 
-    @staticmethod
-    def _normalize_script_args(raw_script_args: Any) -> list[str]:
-        return normalize_script_args(raw_script_args)
-
-    def _build_exec_exact_signature(self, action_input: dict[str, Any]) -> str:
-        return build_exec_exact_signature(action_input)
-
-    def _build_exec_pattern_signature(self, action_input: dict[str, Any]) -> str:
-        return build_exec_pattern_signature(action_input)
-
-    def _build_exec_path_signature(self, action_input: dict[str, Any]) -> str:
-        return build_exec_path_signature(action_input)
-
     def _is_auto_mode(self) -> bool:
         return str(self.mode).strip().lower() == "auto"
 
@@ -141,7 +127,7 @@ class FlowEngine:
                 _push(token)
 
         _push(str(action_input.get("script_path", "")))
-        for arg in self._normalize_script_args(action_input.get("script_args", [])):
+        for arg in normalize_script_args(action_input.get("script_args", [])):
             _push(arg)
         script_value = str(action_input.get("script", "")).strip()
         if script_value:
@@ -176,44 +162,19 @@ class FlowEngine:
         )
         return any(marker in combined_text for marker in markers)
 
-    @staticmethod
-    def _format_exec_value_lines(label: str, value: Any) -> list[str]:
-        return format_exec_value_lines(label, value)
-
-    @staticmethod
-    def _format_history_block(
-        state: StorageEngine,
-        role: str,
-        first_line: str,
-        continuation_lines: list[str],
-    ) -> str:
-        return format_history_block(
-            state=state,
-            role=role,
-            first_line=first_line,
-            continuation_lines=continuation_lines,
-        )
-
-    @staticmethod
-    def _format_ui_block(role: str, first_line: str, continuation_lines: list[str]) -> str:
-        return format_ui_block(role=role, first_line=first_line, continuation_lines=continuation_lines)
-
-    def _build_exec_result_lines(self, exec_result: Any) -> list[str]:
-        return build_exec_result_lines(exec_result)
-
     def _record_exec_result(self, state: StorageEngine, exec_result: dict[str, Any]) -> None:
-        exec_lines = self._build_exec_result_lines(exec_result)
+        exec_lines = build_exec_result_lines(exec_result)
         if not exec_lines:
             return
         first_line = exec_lines[0]
         continuation_lines = exec_lines[1:]
-        history_text = self._format_history_block(
+        history_text = format_history_block(
             state=state,
             role="runtime",
             first_line=first_line,
             continuation_lines=continuation_lines,
         )
-        ui_text = self._format_ui_block(
+        ui_text = format_ui_block(
             role="runtime",
             first_line=first_line,
             continuation_lines=continuation_lines,
@@ -225,23 +186,17 @@ class FlowEngine:
         print(ui_text)
         state.save_state()
 
-    @staticmethod
-    def _format_history_record(state: StorageEngine, role: str, text: str) -> str:
-        return format_history_record(state=state, role=role, text=text)
-
-    @staticmethod
-    def _format_core_agent_record(
-        state: StorageEngine,
-        raw_response: str,
-        action: str,
-        action_input: Any,
-    ) -> str:
-        return format_core_agent_record(
-            state=state,
-            raw_response=raw_response,
-            action=action,
-            action_input=action_input,
+    def _emit_runtime_note(self, state: StorageEngine, text: str) -> None:
+        state.update_state(
+            text=format_history_record(
+                state=state,
+                role="runtime",
+                text=text,
+            ),
         )
+        print()
+        print(f"runtime> {text}")
+        state.save_state()
 
     def _build_exec_approval_prompt(
         self,
@@ -250,7 +205,7 @@ class FlowEngine:
         code_type = str(action_input.get("code_type", "bash")).strip().lower() or "bash"
         job_name = str(action_input.get("job_name", "none")).strip() or "none"
         script_path = str(action_input.get("script_path", "")).strip()
-        script_args = self._normalize_script_args(action_input.get("script_args", []))
+        script_args = normalize_script_args(action_input.get("script_args", []))
         script_preview_full = str(action_input.get("script", "")).strip()
         script_preview = script_preview_full[:500]
 
@@ -272,9 +227,9 @@ class FlowEngine:
     def _confirm_exec(self, state: StorageEngine, action_input: dict[str, Any]) -> bool:
         if str(self.mode).strip().lower() == "auto":
             return True
-        exact_signature = self._build_exec_exact_signature(action_input)
-        pattern_signature = self._build_exec_pattern_signature(action_input)
-        path_signature = self._build_exec_path_signature(action_input)
+        exact_signature = build_exec_exact_signature(action_input)
+        pattern_signature = build_exec_pattern_signature(action_input)
+        path_signature = build_exec_path_signature(action_input)
         if exact_signature in state.exec_approval_exact:
             return True
         if pattern_signature in state.exec_approval_pattern:
@@ -621,16 +576,7 @@ class FlowEngine:
                 else:
                     delay_seconds = 0
                     runtime_note = f"core_agent model call failed: {error_text}."
-                state.update_state(
-                    text=self._format_history_record(
-                        state=state,
-                        role="runtime",
-                        text=runtime_note,
-                    ),
-                )
-                print()
-                print(f"runtime> {runtime_note}")
-                state.save_state()
+                self._emit_runtime_note(state=state, text=runtime_note)
                 if should_retry:
                     if delay_seconds > 0:
                         time.sleep(delay_seconds)
@@ -641,7 +587,7 @@ class FlowEngine:
                 last_failure_kind = "invalid_output"
                 parse_error = str(response.get("_parse_error", "")).strip() if isinstance(response, dict) else ""
                 state.update_state(
-                    text=self._format_history_record(
+                    text=format_history_record(
                         state=state,
                         role="core_agent",
                         text="[invalid_output_rejected]",
@@ -652,21 +598,12 @@ class FlowEngine:
                     + (parse_error if parse_error else "failed to parse model output")
                     + '. Regenerate with <output>{"raw_response":"...","action":"chat_with_requester|keep_reasoning|exec","action_input":{}}</output>.'
                 )
-                state.update_state(
-                    text=self._format_history_record(
-                        state=state,
-                        role="runtime",
-                        text=runtime_note,
-                    ),
-                )
-                print()
-                print(f"runtime> {runtime_note}")
-                state.save_state()
+                self._emit_runtime_note(state=state, text=runtime_note)
                 continue
             raw_response, action, action_input = self._normalize_llm_response(response)
             state.append_action(role="core_agent", action=action, action_input=action_input)
             state.update_state(
-                text=self._format_core_agent_record(
+                text=format_core_agent_record(
                     state=state,
                     raw_response=raw_response,
                     action=action,
@@ -684,17 +621,115 @@ class FlowEngine:
             stop_reason = (
                 f"max invalid output retries reached ({max_invalid_output_retries}); ending current loop"
             )
-        state.update_state(
-            text=self._format_history_record(
-                state=state,
-                role="runtime",
-                text=stop_reason,
-            ),
-        )
-        print()
-        print(f"runtime> {stop_reason}")
-        state.save_state()
+        self._emit_runtime_note(state=state, text=stop_reason)
         return "chat_with_requester", {}, False
+
+    def _handle_exec_action(self, state: StorageEngine, action_input: Any) -> bool:
+        if not isinstance(action_input, dict):
+            self._emit_runtime_note(state=state, text="exec action requires object action_input")
+            return True
+        if not self._confirm_exec(state, action_input):
+            self._emit_runtime_note(state=state, text="exec denied by requester")
+            return False
+
+        try:
+            job_name = str(action_input.get("job_name", "none")).strip() or "none"
+            write_policy_mode = "workspace_write_only" if self._is_auto_mode() else "none"
+            write_override_used = False
+            while True:
+                job_id = f"job_{uuid4().hex[:8]}"
+                job = start_exec_job(
+                    action_input=action_input,
+                    workspace=self.workspace,
+                    job_id=job_id,
+                    job_name=job_name,
+                    write_policy_mode=write_policy_mode,
+                    external_write_roots=list(getattr(state, "exec_auto_write_allowlist", [])),
+                )
+                print()
+                print(
+                    "runtime> [exec started] "
+                    f"job_name={job_name} job_id={job_id} "
+                    f"(Ctrl+C to cancel all, /cancel {job_id} to cancel this job)"
+                )
+
+                exec_results = self._wait_for_exec_jobs([job])
+                if not exec_results:
+                    break
+                exec_result = exec_results[0]
+                self._record_exec_result(state=state, exec_result=exec_result)
+                if (
+                    not self._is_auto_mode()
+                    or write_override_used
+                    or not self._is_write_policy_violation_result(exec_result)
+                ):
+                    break
+
+                stderr_text = str(exec_result.get("stderr", "")).strip()
+                stdout_text = str(exec_result.get("stdout", "")).strip()
+                stderr_lines = [line for line in stderr_text.splitlines() if line.strip()]
+                stdout_lines = [line for line in stdout_text.splitlines() if line.strip()]
+                stderr_preview = "\n".join(stderr_lines[-6:]) if stderr_lines else "(empty)"
+                stdout_preview = "\n".join(stdout_lines[-6:]) if stdout_lines else "(empty)"
+                suggested_paths = self._collect_external_path_suggestions(action_input, exec_result)
+                details = "\n".join(
+                    [
+                        f"job_name={job_name}",
+                        f"job_id={str(exec_result.get('job_id', '')).strip() or 'unknown'}",
+                        "Failure appears to be blocked by workspace write policy.",
+                        "stdout tail:",
+                        stdout_preview,
+                        "stderr tail:",
+                        stderr_preview,
+                    ]
+                )
+                allow_path_raw = ""
+                if self.write_policy_handler is not None:
+                    try:
+                        allow_path_raw = str(self.write_policy_handler(details, suggested_paths) or "").strip()
+                    except Exception:
+                        allow_path_raw = ""
+                allow_path = self._normalize_allow_path(allow_path_raw)
+                if not allow_path:
+                    break
+                allowlist = list(getattr(state, "exec_auto_write_allowlist", []))
+                if allow_path not in allowlist:
+                    allowlist.append(allow_path)
+                    state.exec_auto_write_allowlist = allowlist
+                override_note = (
+                    "auto-mode write override approved: "
+                    f"added writable path {allow_path}; retrying current exec once"
+                )
+                self._emit_runtime_note(state=state, text=override_note)
+                write_override_used = True
+        except Exception as exc:
+            self._emit_runtime_note(state=state, text=f"exec error: {exc}")
+
+        return True
+
+    def _handle_invalid_action(
+        self,
+        *,
+        state: StorageEngine,
+        action: str,
+        invalid_action_retries: int,
+        max_invalid_action_retries: int,
+    ) -> tuple[int, bool]:
+        next_retries = invalid_action_retries + 1
+        correction = (
+            f"You chose invalid next action '{action}'. Please double check your last statement "
+            "and select one allowed action from chat_with_requester, keep_reasoning, and exec."
+        )
+        self._emit_runtime_note(state=state, text=correction)
+        if next_retries < max_invalid_action_retries:
+            return next_retries, False
+
+        stop_reason = (
+            f"max invalid action retries reached ({max_invalid_action_retries}); "
+            "ending current loop"
+        )
+        self._emit_runtime_note(state=state, text=stop_reason)
+        return next_retries, True
 
     def _run_core_agent_loop(
         self,
@@ -724,169 +759,26 @@ class FlowEngine:
                 break
             elif action == "chat_with_sub_agent":
                 invalid_action_retries = 0
-                state.update_state(
-                    text=self._format_history_record(
-                        state=state,
-                        role="runtime",
-                        text="chat_with_sub_agent is disabled in current runtime",
-                    ),
+                self._emit_runtime_note(
+                    state=state,
+                    text="chat_with_sub_agent is disabled in current runtime",
                 )
-                print()
-                print(f"runtime> chat_with_sub_agent is disabled in current runtime")
-                state.save_state()
             elif action == "exec":
                 invalid_action_retries = 0
-                if not isinstance(action_input, dict):
-                    state.update_state(
-                        text=self._format_history_record(
-                            state=state,
-                            role="runtime",
-                            text="exec action requires object action_input",
-                        ),
-                    )
-                    print()
-                    print(f"runtime> exec action requires object action_input")
-                    state.save_state()
-                else:
-                    if not self._confirm_exec(state, action_input):
-                        state.update_state(
-                            text=self._format_history_record(
-                                state=state,
-                                role="runtime",
-                                text="exec denied by requester",
-                            ),
-                        )
-                        print()
-                        print(f"runtime> exec denied by requester")
-                        state.save_state()
-                        break
-                    try:
-                        job_name = str(action_input.get("job_name", "none")).strip() or "none"
-                        write_policy_mode = "workspace_write_only" if self._is_auto_mode() else "none"
-                        write_override_used = False
-                        while True:
-                            job_id = f"job_{uuid4().hex[:8]}"
-                            job = start_exec_job(
-                                action_input=action_input,
-                                workspace=self.workspace,
-                                job_id=job_id,
-                                job_name=job_name,
-                                write_policy_mode=write_policy_mode,
-                                external_write_roots=list(getattr(state, "exec_auto_write_allowlist", [])),
-                            )
-                            print()
-                            print(
-                                "runtime> [exec started] "
-                                f"job_name={job_name} job_id={job_id} "
-                                f"(Ctrl+C to cancel all, /cancel {job_id} to cancel this job)"
-                            )
-
-                            exec_results = self._wait_for_exec_jobs([job])
-                            if not exec_results:
-                                break
-                            exec_result = exec_results[0]
-                            self._record_exec_result(state=state, exec_result=exec_result)
-                            if (
-                                not self._is_auto_mode()
-                                or write_override_used
-                                or not self._is_write_policy_violation_result(exec_result)
-                            ):
-                                break
-
-                            stderr_text = str(exec_result.get("stderr", "")).strip()
-                            stdout_text = str(exec_result.get("stdout", "")).strip()
-                            stderr_lines = [line for line in stderr_text.splitlines() if line.strip()]
-                            stdout_lines = [line for line in stdout_text.splitlines() if line.strip()]
-                            stderr_preview = "\n".join(stderr_lines[-6:]) if stderr_lines else "(empty)"
-                            stdout_preview = "\n".join(stdout_lines[-6:]) if stdout_lines else "(empty)"
-                            suggested_paths = self._collect_external_path_suggestions(action_input, exec_result)
-                            details = "\n".join(
-                                [
-                                    f"job_name={job_name}",
-                                    f"job_id={str(exec_result.get('job_id', '')).strip() or 'unknown'}",
-                                    "Failure appears to be blocked by workspace write policy.",
-                                    "stdout tail:",
-                                    stdout_preview,
-                                    "stderr tail:",
-                                    stderr_preview,
-                                ]
-                            )
-                            allow_path_raw = ""
-                            if self.write_policy_handler is not None:
-                                try:
-                                    allow_path_raw = str(
-                                        self.write_policy_handler(details, suggested_paths) or ""
-                                    ).strip()
-                                except Exception:
-                                    allow_path_raw = ""
-                            allow_path = self._normalize_allow_path(allow_path_raw)
-                            if not allow_path:
-                                break
-                            allowlist = list(getattr(state, "exec_auto_write_allowlist", []))
-                            if allow_path not in allowlist:
-                                allowlist.append(allow_path)
-                                state.exec_auto_write_allowlist = allowlist
-                            override_note = (
-                                "auto-mode write override approved: "
-                                f"added writable path {allow_path}; retrying current exec once"
-                            )
-                            state.update_state(
-                                text=self._format_history_record(
-                                    state=state,
-                                    role="runtime",
-                                    text=override_note,
-                                ),
-                            )
-                            print()
-                            print(f"runtime> {override_note}")
-                            state.save_state()
-                            write_override_used = True
-
-                    except Exception as exc:
-                        state.update_state(
-                            text=self._format_history_record(
-                                state=state,
-                                role="runtime",
-                                text=f"exec error: {exc}",
-                            ),
-                        )
-                        print()
-                        print(f"runtime> exec error: {exc}")
-                        state.save_state()
+                should_continue = self._handle_exec_action(state=state, action_input=action_input)
+                if not should_continue:
+                    break
             elif action == "keep_reasoning":
                 invalid_action_retries = 0
                 pass
             else:
-                invalid_action_retries += 1
-                correction = (
-                    f"You chose invalid next action '{action}'. Please double check your last statement "
-                    "and select one allowed action from chat_with_requester, keep_reasoning, and exec."
+                invalid_action_retries, should_stop = self._handle_invalid_action(
+                    state=state,
+                    action=action,
+                    invalid_action_retries=invalid_action_retries,
+                    max_invalid_action_retries=max_invalid_action_retries,
                 )
-                state.update_state(
-                    text=self._format_history_record(
-                        state=state,
-                        role="runtime",
-                        text=correction,
-                    ),
-                )
-                print()
-                print(f"runtime> {correction}")
-                state.save_state()
-                if invalid_action_retries >= max_invalid_action_retries:
-                    stop_reason = (
-                        f"max invalid action retries reached ({max_invalid_action_retries}); "
-                        "ending current loop"
-                    )
-                    state.update_state(
-                        text=self._format_history_record(
-                            state=state,
-                            role="runtime",
-                            text=stop_reason,
-                        ),
-                    )
-                    print()
-                    print(f"runtime> {stop_reason}")
-                    state.save_state()
+                if should_stop:
                     break
 
             action, action_input, ok = self._call_core_agent(
@@ -898,16 +790,10 @@ class FlowEngine:
                 return
 
         if turns >= max_turns:
-            state.update_state(
-                text=self._format_history_record(
-                    state=state,
-                    role="runtime",
-                    text=f"max turns reached ({max_turns}); ending current loop",
-                ),
+            self._emit_runtime_note(
+                state=state,
+                text=f"max turns reached ({max_turns}); ending current loop",
             )
-            print()
-            print(f"runtime> max turns reached ({max_turns}); ending current loop")
-            state.save_state()
 
     def process_user_message(
         self,
@@ -925,7 +811,7 @@ class FlowEngine:
             raise ValueError("user_text must be non-empty")
 
         state.update_state(
-            text=self._format_history_record(
+            text=format_history_record(
                 state=state,
                 role="user",
                 text=stripped,

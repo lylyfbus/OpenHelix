@@ -303,7 +303,7 @@ class PromptEngine:
         if role == "workflow_summarizer":
             return self.WORKFLOW_SUMMARIZER_PROMPT
         
-        if role == "workflow_history_compactor":
+        if role == "workflow_compactor":
             return self.WORKFLOW_COMPACTOR_PROMPT
 
         prompts = self._load_system_prompts()
@@ -348,7 +348,6 @@ class PromptEngine:
         text = selected.strip()
         if self._AGENT_ROLES_PLACEHOLDER in text:
             text = text.replace(self._AGENT_ROLES_PLACEHOLDER, roles_section)
-
         if self._SKILLS_META_PLACEHOLDER in text:
             text = text.replace(self._SKILLS_META_PLACEHOLDER, skills_section)
         if self._KNOWLEDGE_META_PLACEHOLDER in text:
@@ -473,15 +472,14 @@ class PromptEngine:
 
     def _compact_workflow_history(
         self,
-        role: str,
         state: Any,
-        compact_keep_last_k: int,
         model_router: Any,
+        compact_keep_last_k: int
     ) -> None:
         head = state.workflow_hist[:-compact_keep_last_k] if compact_keep_last_k < len(state.workflow_hist) else []
         tail = state.workflow_hist[-compact_keep_last_k:] if compact_keep_last_k > 0 else []
         workflow_summary = state.workflow_summary if isinstance(state.workflow_summary, str) else ""
-        system_prompt = self._get_system_prompt(role)
+        system_prompt = self._get_system_prompt("workflow_compactor")
         final_prompt = self._build_observer_prompt_text(
             system_prompt=system_prompt,
             workflow_summary=workflow_summary,
@@ -577,10 +575,9 @@ class PromptEngine:
                 model_router=model_router,
             )
             self._compact_workflow_history(
-                role="workflow_history_compactor",
                 state=state,
-                compact_keep_last_k=self.compact_keep_last_k,
                 model_router=model_router,
+                compact_keep_last_k=self.compact_keep_last_k
             )
             workflow_summary = str(getattr(state, "workflow_summary", "")).strip()
             workflow_history: list[str] = getattr(state, "workflow_hist", [])

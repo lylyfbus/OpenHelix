@@ -31,7 +31,7 @@ It is written for readers who want to understand:
 - Bootstraps runtime assets (`prompts/`, `skills/`) into the workspace.
 - Owns interactive command handling (`/help`, `/status`, `/refresh`, `/exit`).
 
-2. `FlowEngine` (`/Users/yangliu/Projects/Business/AgenticSystem/agentic_system/kernel/orchestrator.py`)
+2. `FlowEngine` (`/Users/yangliu/Projects/Business/AgenticSystem/agentic_system/kernel/agent_loop.py`)
 - Runs the core agent loop.
 - Streams model `raw_response` tokens to UI.
 - Validates output contract and retries invalid generations.

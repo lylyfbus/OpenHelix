@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from agentic_system.cli import build_parser
 from agentic_system.kernel.model_router import ModelRouter
-from agentic_system.kernel.orchestrator import FlowEngine
+from agentic_system.kernel.agent_loop import FlowEngine
 from agentic_system.kernel.prompts import PromptEngine
 from agentic_system.kernel.storage import StorageEngine
 from agentic_system.runtime import AgentRuntime
