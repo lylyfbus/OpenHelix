@@ -1,5 +1,1 @@
-"""Top-level package exports for runtime embedding/invocation."""
-
-from .runtime import AgentRuntime
-
-__all__ = ["AgentRuntime"]
+"""Agentic System — RL-inspired agent framework."""

@@ -1,30 +1,23 @@
 # Agentic System
 
-Terminal-first agentic runtime with:
-- stateful workflow history + summary,
-- strict action contract (`chat_with_requester|keep_reasoning|exec`),
-- runtime exec control with approval modes and cancellation,
-- pluggable model providers (`ollama`, `lmstudio`, `zai`, `deepseek`, `openai_compatible`),
-- built-in skill bootstrapping into workspace.
+RL-inspired agent framework built on a universal loop:
 
-## Current Package Layout
+```
+state → agent(state) → action → environment(action) → observation → state
+```
 
-```text
+## Package Layout
+
+```
 agentic_system/
-  cli.py
-  runtime.py
-  kernel/
-    agent_loop.py
-    prompts.py
-    model_router.py
-    executors.py
-    storage.py
-    history_utils.py
-  prompts/
-    agent_system_prompt.json
-    agent_role_description.json
-skills/
+  core/           → state, action, agent, environment, loop
+  runtime/        → sandbox, approval, host, cli
+  providers/      → ollama, openai_compat (deepseek, lmstudio, zai)
+  context/        → skill_loader, knowledge_loader, prompt_builder
+  builtin_skills/ → 9 built-in skills (bootstrapped into workspace)
+  prompts/        → system prompt templates
 tests/
+knowledge/
 ```
 
 ## Install
@@ -33,57 +26,62 @@ tests/
 python -m pip install -e .
 ```
 
-## Start Runtime UI
+## Usage
 
 ```bash
-python -m agentic_system \
-  --workspace /absolute/or/relative/workspace \
-  --provider ollama \
-  --model llama3.1:8b \
-  --mode controlled
-```
+# Default: Ollama, controlled mode
+python -m agentic_system --workspace .
 
-### Image skill runtime config
+# With DeepSeek
+python -m agentic_system --provider deepseek --workspace ~/agent
 
-Use canonical names only:
+# Auto mode (no confirmation prompts)
+python -m agentic_system --mode auto --workspace .
 
-```bash
-python -m agentic_system \
-  --workspace ./runtime_workspace \
-  --provider zai \
-  --model glm-5 \
-  --image-analysis-provider ollama \
-  --image-analysis-model llava:latest \
-  --image-generation-provider ollama \
-  --image-generation-model x/z-image-turbo
+# Custom tool models
+python -m agentic_system --workspace . \
+  --image-analysis-model glm-ocr \
+  --image-generation-model x/z-image-turbo \
+  --searxng-base-url http://127.0.0.1:8888
 ```
 
 ## Runtime Commands
 
-- `/help`
-- `/status`
-- `/status workflow_summary`
-- `/status workflow_hist`
-- `/status full_proc_hist`
-- `/status action_hist`
-- `/status core_agent_prompt`
-- `/refresh`
-- `/exit`
+- `/help` — show available commands
+- `/status` — session overview (provider, mode, tool config, history)
+- `/exit` — quit
 
-## Production Notes
+## Architecture
 
-1. Prefer `--mode controlled` for human-in-the-loop execution.
-2. Use `--mode auto` only when workspace write-policy behavior is acceptable for your use case.
-3. Set provider credentials through environment variables (for example `ZAI_API_KEY`, `DEEPSEEK_API_KEY`, `OPENAI_COMPAT_API_KEY`).
-4. Keep `skills/` and `prompts/` under version control; runtime bootstraps these into the workspace each session.
+**4 action types** cover everything:
+- `chat` — respond to user
+- `think` — internal reasoning (loop continues)
+- `exec` — run bash/python in sandbox
+- `delegate` — spawn sub-agent with isolated workspace
+
+**Skills** are drop-in folders with `SKILL.md` + scripts. 9 built-in skills ship with the package and are synced into the workspace on startup.
+
+**Providers**: `ollama`, `deepseek`, `lmstudio`, `zai`, `openai_compatible`.
 
 ## Tests
 
 ```bash
-python -m unittest -v tests/test_runtime_kernel.py
+python tests/test_core.py      # 21 tests — state, action, agent, env, loop
+python tests/test_runtime.py   # 11 tests — sandbox, approval
+python tests/test_context.py   # 15 tests — providers, skills, knowledge, prompts
+python tests/test_skills.py    #  8 tests — real workspace, bootstrap
+python tests/test_host.py      # 16 tests — RuntimeHost, CLI
+python tests/test_delegate.py  #  7 tests — sub-agent delegation
 ```
 
-## Migration
+## Configuration
 
-Legacy image config names were removed. See:
-- `/Users/yangliu/Projects/Business/AgenticSystem/docs/migrations/2026-02-image-config-rename.md`
+| Env Var | Default | Purpose |
+|---|---|---|
+| `IMAGE_ANALYSIS_PROVIDER` | `ollama` | Image understanding provider |
+| `IMAGE_ANALYSIS_MODEL` | `glm-ocr` | Image understanding model |
+| `IMAGE_GENERATION_PROVIDER` | `ollama` | Image generation provider |
+| `IMAGE_GENERATION_MODEL` | `x/z-image-turbo` | Image generation model |
+| `SEARXNG_BASE_URL` | `http://127.0.0.1:8888` | SearXNG for web search |
+
+CLI flags (`--image-analysis-model`, etc.) override env vars.

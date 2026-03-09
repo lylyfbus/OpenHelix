@@ -23,8 +23,13 @@ jobs:
 
       - name: Compile check
         run: |
-          python -m py_compile $(find agentic_system -name '*.py' -type f)
+          python -m py_compile $(find agentic_system -name '*.py' -type f ! -path '*__pycache__*')
 
       - name: Unit tests
         run: |
-          python -m unittest -v tests/test_runtime_kernel.py
+          python tests/test_core.py
+          python tests/test_runtime.py
+          python tests/test_context.py
+          python tests/test_skills.py
+          python tests/test_host.py
+          python tests/test_delegate.py

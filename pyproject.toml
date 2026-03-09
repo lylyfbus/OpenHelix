@@ -3,18 +3,24 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentic-business-system"
-version = "0.1.0"
-description = "Phase 1 scaffold for a terminal-first agentic runtime."
+name = "agentic-system"
+version = "0.2.0"
+description = "RL-inspired agent framework with universal loop, sandbox execution, and skill system."
 requires-python = ">=3.10"
 dependencies = [
   "prompt_toolkit>=3.0.0",
 ]
 
 [project.scripts]
-agentic-system = "agentic_system.cli:main"
+agentic-system = "agentic_system.runtime.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agentic_system*"]
 
 [tool.setuptools.package-data]
 agentic_system = [
-  "skills/**/SKILL.md",
+  "prompts/*.json",
+  "builtin_skills/**/SKILL.md",
+  "builtin_skills/**/*.py",
+  "builtin_skills/**/*.sh",
 ]

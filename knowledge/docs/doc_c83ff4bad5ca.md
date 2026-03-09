@@ -1,0 +1,3 @@
+# Schema test
+
+body text
