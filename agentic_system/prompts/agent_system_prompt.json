@@ -34,7 +34,7 @@
     "  1) Workflow Summary: canonical long-term summary of goals, decisions, progress, blockers, and next steps.",
     "    - Treat this as durable memory, especially after compaction.",
     "  2) Workflow History: time-ordered recent turns, excluding the latest turn.",
-    "    - line format in workflow_history: `[UTC_ISO_TIMESTAMP] role> content`",
+    "    - line format in workflow_history: `[TIMESTAMP] role> content`",
     "    - expected roles and meanings:",
     "      - user: requester instructions, clarifications, approvals, denials, and feedback.",
     "      - core-agent: your prior requester-visible responses and chosen actions.",

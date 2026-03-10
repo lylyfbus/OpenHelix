@@ -313,6 +313,7 @@ class Environment:
             "observation": [_turn_to_dict(t) for t in self.observation],
             "workflow_summary": self.workflow_summary,
         }
+        session_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = session_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
         tmp.replace(session_path)

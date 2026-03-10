@@ -7,6 +7,7 @@ timeout enforcement, and graceful termination.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import signal
@@ -222,6 +223,90 @@ def _collect_result(
     }
 
 
+def _scalar_text(value: Any) -> str:
+    """Render a scalar value in a concise, readable form."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _indent_block(text: str, prefix: str) -> str:
+    """Indent each line in a text block with the given prefix."""
+    return "\n".join(f"{prefix}{line}" for line in text.splitlines())
+
+
+def _format_structured_value(value: Any, indent: int = 0) -> str:
+    """Format JSON-like data into a readable YAML-like block."""
+    prefix = "  " * indent
+
+    if isinstance(value, dict):
+        if not value:
+            return f"{prefix}{{}}"
+        lines: list[str] = []
+        for key, item in value.items():
+            key_text = f"{prefix}{key}:"
+            if isinstance(item, str):
+                if "\n" in item:
+                    lines.append(f"{key_text} |")
+                    lines.append(_indent_block(item, prefix + "  "))
+                else:
+                    lines.append(f"{key_text} {item}")
+            elif isinstance(item, (dict, list)):
+                lines.append(key_text)
+                lines.append(_format_structured_value(item, indent + 1))
+            else:
+                lines.append(f"{key_text} {_scalar_text(item)}")
+        return "\n".join(lines)
+
+    if isinstance(value, list):
+        if not value:
+            return f"{prefix}[]"
+        lines = []
+        for item in value:
+            item_prefix = f"{prefix}-"
+            if isinstance(item, str):
+                if "\n" in item:
+                    lines.append(f"{item_prefix} |")
+                    lines.append(_indent_block(item, prefix + "  "))
+                else:
+                    lines.append(f"{item_prefix} {item}")
+            elif isinstance(item, (dict, list)):
+                lines.append(item_prefix)
+                lines.append(_format_structured_value(item, indent + 1))
+            else:
+                lines.append(f"{item_prefix} {_scalar_text(item)}")
+        return "\n".join(lines)
+
+    if isinstance(value, str):
+        if "\n" in value:
+            return "\n".join([
+                f"{prefix}|",
+                _indent_block(value, prefix + "  "),
+            ])
+        return f"{prefix}{value}"
+
+    return f"{prefix}{_scalar_text(value)}"
+
+
+def _format_output_block(name: str, text: str) -> str:
+    """Wrap stdout/stderr in readable tags, prettifying JSON when possible."""
+    cleaned = text.rstrip()
+    if not cleaned:
+        return ""
+
+    rendered = cleaned
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        parsed = None
+    if parsed is not None:
+        rendered = _format_structured_value(parsed)
+
+    return f"\n\n<{name}>\n{rendered}\n</{name}>"
+
+
 # --------------------------------------------------------------------------- #
 # Public API — the Environment executor
 # --------------------------------------------------------------------------- #
@@ -240,17 +325,18 @@ def sandbox_executor(payload: dict, workspace: Path) -> Turn:
         default_timeout = 600
 
     timeout = payload.get("timeout_seconds", default_timeout)
+    job_name = str(payload.get("job_name", "unnamed_job")).strip() or "unnamed_job"
 
     try:
         job = _start_job(
             action_input=payload,
             workspace=workspace,
-            job_name=payload.get("job_name", "unnamed_job"),
+            job_name=job_name,
         )
     except Exception as e:
         return Turn(
             role="runtime",
-            content=f"Execution failed to start: {e}",
+            content=f"Job '{job_name}' failed to start: {e}",
         )
 
     try:
@@ -273,11 +359,12 @@ def sandbox_executor(payload: dict, workspace: Path) -> Turn:
     stderr = result["stderr"]
     rc = result["return_code"]
 
-    content = f"Command {'succeeded' if rc == 0 else 'failed'}. (Exit code: {rc})"
+    status = "succeeded" if rc == 0 else "failed"
+    content = f"Job '{job_name}' {status}. (Exit code: {rc})"
     if stdout:
-        content += f"\n\nSTDOUT:\n{stdout}"
+        content += _format_output_block("stdout", stdout)
     if stderr:
-        content += f"\n\nSTDERR:\n{stderr}"
+        content += _format_output_block("stderr", stderr)
 
     return Turn(
         role="runtime",

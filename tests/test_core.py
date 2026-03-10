@@ -1,5 +1,6 @@
 """Phase 1 verification tests for the core RL-inspired abstractions."""
 
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -24,6 +25,7 @@ def test_turn_creation():
     assert t.role == "user"
     assert t.content == "hello"
     assert t.timestamp  # auto-generated
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", t.timestamp)
     print("  Turn creation OK")
 
 

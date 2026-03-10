@@ -135,43 +135,14 @@ def run_loop(
 # --------------------------------------------------------------------------- #
 def _print(output: TextIO, text: str = "", *, action: Action | None = None) -> None:
     """Print to the output stream immediately (unbuffered).
-    
-    If an action is provided, prints its action type and input details
-    (the response text is assumed to be already streamed).
+
+    Action metadata is not printed to the requester-facing UI.
+    The full action details are still recorded into workflow history.
     """
     if "\n" not in text and action is None:
         pass
     elif text:
         output.write(text)
-        output.flush()
-
-    if action:
-        output.write(f"[next_action] {action.type}\n")
-        
-        if action.type == "exec" and action.payload:
-            lines = ["[action_input]"]
-            for key in ("job_name", "code_type", "script_path", "script"):
-                value = action.payload.get(key)
-                if value:
-                    text_val = str(value)
-                    if key == "script" and len(text_val) > 200:
-                        text_val = text_val[:200] + "..."
-                    lines.append(f"  {key}: {text_val}")
-            args = action.payload.get("script_args")
-            if args:
-                lines.append(f"  script_args: {args}")
-            if len(lines) > 1:
-                output.write("\n".join(lines) + "\n")
-                
-        elif action.type == "delegate" and action.payload:
-            lines = ["[action_input]"]
-            for key in ("role", "objective"):
-                value = action.payload.get(key)
-                if value:
-                    lines.append(f"  {key}: {value}")
-            if len(lines) > 1:
-                output.write("\n".join(lines) + "\n")
-        
         output.flush()
 
 # --------------------------------------------------------------------------- #

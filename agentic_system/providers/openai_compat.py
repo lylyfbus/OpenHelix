@@ -50,6 +50,7 @@ class OpenAICompatProvider:
             "default_model": "glm-5",
         },
     }
+    REQUIRED_API_KEY_PROVIDERS = {"deepseek", "zai"}
 
     def __init__(
         self,
@@ -102,6 +103,8 @@ class OpenAICompatProvider:
         chunk_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         """Generate text via chat completions; optionally stream via SSE."""
+        self._validate_configuration()
+
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -149,6 +152,21 @@ class OpenAICompatProvider:
             raise RuntimeError(f"{self.provider} HTTP {exc.code}: {body}") from exc
         except URLError as exc:
             raise RuntimeError(f"{self.provider} network error: {exc}") from exc
+
+    def _validate_configuration(self) -> None:
+        """Fail fast for providers that require an API key."""
+        provider_name = self.provider.strip().lower()
+        if provider_name not in self.REQUIRED_API_KEY_PROVIDERS:
+            return
+        if self.api_key:
+            return
+
+        preset = self.PRESETS.get(provider_name, {})
+        provider_key_env = preset.get("api_key_env", "API_KEY")
+        raise RuntimeError(
+            f"Missing API key for provider '{provider_name}'. "
+            f"Set {provider_key_env} or OPENAI_COMPAT_API_KEY."
+        )
 
 
 # --------------------------------------------------------------------------- #

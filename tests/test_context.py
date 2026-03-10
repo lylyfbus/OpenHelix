@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -62,6 +63,32 @@ def test_openai_provider_presets():
     lm = OpenAICompatProvider(provider="lmstudio", model="my-model")
     assert lm.model == "my-model"
     print("  OpenAICompatProvider presets OK")
+
+
+def test_openai_provider_requires_api_key_for_zai():
+    """Verify Z.AI fails fast with a clear message when the API key is missing."""
+    with patch.dict("os.environ", {}, clear=True):
+        provider = OpenAICompatProvider(provider="zai")
+        try:
+            provider.generate("hello")
+            assert False, "Expected missing API key to raise"
+        except RuntimeError as exc:
+            assert "Missing API key" in str(exc)
+            assert "ZAI_API_KEY" in str(exc)
+    print("  OpenAICompatProvider missing Z.AI key OK")
+
+
+def test_openai_provider_requires_api_key_for_deepseek():
+    """Verify DeepSeek fails fast with a clear message when the API key is missing."""
+    with patch.dict("os.environ", {}, clear=True):
+        provider = OpenAICompatProvider(provider="deepseek")
+        try:
+            provider.generate("hello")
+            assert False, "Expected missing API key to raise"
+        except RuntimeError as exc:
+            assert "Missing API key" in str(exc)
+            assert "DEEPSEEK_API_KEY" in str(exc)
+    print("  OpenAICompatProvider missing DeepSeek key OK")
 
 
 def test_provider_satisfies_protocol():
@@ -279,6 +306,8 @@ if __name__ == "__main__":
     test_ollama_provider_custom_init()
     test_openai_provider_init()
     test_openai_provider_presets()
+    test_openai_provider_requires_api_key_for_zai()
+    test_openai_provider_requires_api_key_for_deepseek()
     test_provider_satisfies_protocol()
 
     print("\n=== Skill Loader ===")

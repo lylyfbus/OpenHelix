@@ -184,6 +184,7 @@ def test_full_pipeline_with_skill_exec():
 
         runtime_turns = [t for t in env.full_history if t.role == "runtime"]
         assert len(runtime_turns) == 1
+        assert "Job 'test-skill-pipeline' succeeded." in runtime_turns[0].content
         assert "Skills loaded successfully" in runtime_turns[0].content
         assert "Exit code: 0" in runtime_turns[0].content
 

@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agentic_system.runtime.host import RuntimeHost, _create_provider, extract_streaming_response
 from agentic_system.runtime.cli import build_parser, main as cli_main
+from agentic_system.core.environment import Environment
+from agentic_system.core.state import Turn
 from agentic_system.providers.ollama import OllamaProvider
 from agentic_system.providers.openai_compat import OpenAICompatProvider
 
@@ -73,6 +75,8 @@ def test_host_init():
         assert host.provider_name == "ollama"
         assert host.mode == "auto"
         assert host.workspace == Path(td).resolve()
+        assert host.session_id is None
+        assert host.session_path is None
         assert len(host._agent.system_prompt) > 0  # loaded from package prompts
         print("  RuntimeHost init OK")
 
@@ -88,6 +92,33 @@ def test_host_init_controlled():
         assert host.provider_name == "deepseek"
         assert host.mode == "controlled"
         print("  RuntimeHost init (controlled) OK")
+
+
+def test_host_init_with_session_id_loads_existing_state():
+    """Verify RuntimeHost resumes a named session when it already exists."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        session_path = workspace / ".sessions" / "review-01.json"
+
+        env = Environment(workspace=workspace)
+        env.record(Turn(role="user", content="Previous request"))
+        env.record(Turn(role="core-agent", content="Previous response"))
+        env.workflow_summary = "Prior summary"
+        env.save_session(session_path)
+
+        host = RuntimeHost(
+            workspace=workspace,
+            provider="ollama",
+            mode="auto",
+            session_id="review-01",
+        )
+
+        assert host.session_id == "review-01"
+        assert host.session_path == session_path.resolve()
+        assert host._session_loaded is True
+        assert len(host._env.full_history) == 2
+        assert host._env.workflow_summary == "Prior summary"
+        print("  RuntimeHost named session resume OK")
 
 
 # =========================================================================== #
@@ -112,7 +143,68 @@ def test_host_command_status():
         result = host._handle_command("/status")
         assert "provider=" in result
         assert "mode=" in result
+        assert "session_state=ephemeral" in result
         print("  /status command OK")
+
+
+def test_host_command_full_history():
+    """Verify /full_history returns the in-memory full history content."""
+    with tempfile.TemporaryDirectory() as td:
+        host = RuntimeHost(workspace=Path(td))
+        host._env.record(Turn(
+            role="user",
+            content="Hello",
+            timestamp="2026-03-10 00:41:55",
+        ))
+        result = host._handle_command("/full_history")
+        assert "<full_history>" in result
+        assert "[2026-03-10 00:41:55] user> Hello" in result
+        assert "user> Hello" in result
+        print("  /full_history command OK")
+
+
+def test_host_command_observation():
+    """Verify /observation returns the current observation content."""
+    with tempfile.TemporaryDirectory() as td:
+        host = RuntimeHost(workspace=Path(td))
+        host._env.record(Turn(role="user", content="Hello"))
+        result = host._handle_command("/observation")
+        assert "<observation>" in result
+        assert "user> Hello" in result
+        print("  /observation command OK")
+
+
+def test_host_command_workflow_summary():
+    """Verify /workflow_summary returns the current summary content."""
+    with tempfile.TemporaryDirectory() as td:
+        host = RuntimeHost(workspace=Path(td))
+        host._env.workflow_summary = "## Current Status\nWorking"
+        result = host._handle_command("/workflow_summary")
+        assert "<workflow_summary>" in result
+        assert "## Current Status" in result
+        print("  /workflow_summary command OK")
+
+
+def test_host_command_last_prompt():
+    """Verify /last_prompt returns the last prompt sent to the core agent."""
+    with tempfile.TemporaryDirectory() as td:
+        host = RuntimeHost(workspace=Path(td))
+        host._agent.last_prompt = "system\n\n<latest_context>\n[user] Hello\n</latest_context>"
+        result = host._handle_command("/last_prompt")
+        assert "<last_prompt>" in result
+        assert "<latest_context>" in result
+        assert "[user] Hello" in result
+        print("  /last_prompt command OK")
+
+
+def test_host_command_last_prompt_empty():
+    """Verify /last_prompt is explicit before any prompt is sent."""
+    with tempfile.TemporaryDirectory() as td:
+        host = RuntimeHost(workspace=Path(td))
+        result = host._handle_command("/last_prompt")
+        assert "<last_prompt>" in result
+        assert "(none yet)" in result
+        print("  /last_prompt empty OK")
 
 
 def test_host_command_exit():
@@ -156,6 +248,7 @@ def test_host_process_message():
         captured = StringIO()
         with patch("sys.stdout", captured):
             host._process_message("Hello agent!")
+        output = captured.getvalue()
 
         # Verify user turn was recorded
         user_turns = [t for t in host._env.full_history if t.role == "user"]
@@ -166,11 +259,43 @@ def test_host_process_message():
         agent_turns = [t for t in host._env.full_history if t.role == "core-agent"]
         assert len(agent_turns) == 1
         assert "Hello from the agent!" in agent_turns[0].content
+        assert "[next_action] chat" in agent_turns[0].content
+
+        # Requester-facing UI should not include action metadata
+        assert "[next_action]" not in output
+        assert "[action_input]" not in output
 
         # Verify model was called
         assert mock_generate.called
+        assert not (Path(td) / ".session").exists()
 
         print("  Message processing OK")
+
+
+def test_host_process_message_saves_named_session():
+    """Verify named sessions persist after each interaction."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        host = RuntimeHost(workspace=workspace, session_id="active-1")
+
+        mock_generate = MagicMock(return_value=(
+            '<output>'
+            '{"response": "Saved response", '
+            '"action": "chat", "action_input": {}}'
+            '</output>'
+        ))
+        host._model.generate = mock_generate
+
+        captured = StringIO()
+        with patch("sys.stdout", captured):
+            host._process_message("Persist this")
+
+        session_path = workspace / ".sessions" / "active-1.json"
+        assert session_path.exists()
+        reloaded = Environment(workspace=workspace)
+        assert reloaded.load_session(session_path) is True
+        assert any(t.content == "Persist this" for t in reloaded.full_history)
+        print("  Named session persistence OK")
 
 
 def test_host_process_exec():
@@ -211,6 +336,28 @@ def test_host_process_exec():
         print("  Exec processing OK")
 
 
+def test_host_process_message_runtime_error():
+    """Verify runtime-facing provider errors are surfaced without crashing."""
+    with tempfile.TemporaryDirectory() as td:
+        host = RuntimeHost(workspace=Path(td))
+        host._model.generate = MagicMock(
+            side_effect=RuntimeError(
+                "Missing API key for provider 'zai'. Set ZAI_API_KEY or OPENAI_COMPAT_API_KEY."
+            )
+        )
+
+        captured = StringIO()
+        with patch("sys.stdout", captured):
+            host._process_message("Who are you?")
+
+        output = captured.getvalue()
+        assert "runtime> Agent error: Missing API key for provider 'zai'" in output
+        runtime_turns = [t for t in host._env.full_history if t.role == "runtime"]
+        assert len(runtime_turns) == 1
+        assert "Missing API key for provider 'zai'" in runtime_turns[0].content
+        print("  Message runtime error handling OK")
+
+
 # =========================================================================== #
 # CLI parser tests
 # =========================================================================== #
@@ -224,11 +371,13 @@ def test_cli_parser():
         "--mode", "auto",
         "--model", "deepseek-chat",
         "--workspace", "/tmp/test",
+        "--session-id", "design-01",
     ])
     assert args.provider == "deepseek"
     assert args.mode == "auto"
     assert args.model == "deepseek-chat"
     assert args.workspace == "/tmp/test"
+    assert args.session_id == "design-01"
     print("  CLI parser OK")
 
 
@@ -239,7 +388,18 @@ def test_cli_parser_defaults():
     assert args.provider == "ollama"
     assert args.mode == "controlled"
     assert args.model is None
+    assert args.session_id is None
     print("  CLI parser defaults OK")
+
+
+def test_host_invalid_session_id():
+    """Verify RuntimeHost rejects unsafe session identifiers."""
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            RuntimeHost(workspace=Path(td), session_id="../bad")
+            assert False, "Expected invalid session_id to raise"
+        except ValueError:
+            print("  Invalid session id rejected OK")
 
 
 # =========================================================================== #
@@ -252,6 +412,20 @@ def test_streaming_extractor():
     result = extract_streaming_response(partial)
     assert result == "Hello wor"
     print("  Streaming extractor OK")
+
+
+def test_streaming_extractor_decodes_newlines():
+    partial = '{"response": "Hello\\nworld"}'
+    result = extract_streaming_response(partial)
+    assert result == "Hello\nworld"
+    print("  Streaming extractor newline decode OK")
+
+
+def test_streaming_extractor_handles_partial_escape():
+    partial = '{"response": "Hello\\'
+    result = extract_streaming_response(partial)
+    assert result == "Hello"
+    print("  Streaming extractor partial escape OK")
 
 
 def test_streaming_extractor_not_yet():
@@ -275,23 +449,34 @@ if __name__ == "__main__":
     print("\n=== RuntimeHost Init ===")
     test_host_init()
     test_host_init_controlled()
+    test_host_init_with_session_id_loads_existing_state()
 
     print("\n=== Slash Commands ===")
     test_host_command_help()
     test_host_command_status()
+    test_host_command_full_history()
+    test_host_command_observation()
+    test_host_command_workflow_summary()
+    test_host_command_last_prompt()
+    test_host_command_last_prompt_empty()
     test_host_command_exit()
     test_host_command_unknown()
 
     print("\n=== Message Processing ===")
     test_host_process_message()
+    test_host_process_message_saves_named_session()
     test_host_process_exec()
+    test_host_process_message_runtime_error()
 
     print("\n=== CLI Parser ===")
     test_cli_parser()
     test_cli_parser_defaults()
+    test_host_invalid_session_id()
 
     print("\n=== Streaming ===")
     test_streaming_extractor()
+    test_streaming_extractor_decodes_newlines()
+    test_streaming_extractor_handles_partial_escape()
     test_streaming_extractor_not_yet()
 
     print("\n✅ All Phase 5 tests passed!")

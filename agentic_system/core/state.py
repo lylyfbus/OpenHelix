@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 
+def _utc_now_timestamp() -> str:
+    """Return current UTC time in a compact, human-readable form."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 @dataclass
 class Turn:
     """One entry in the environment timeline.
@@ -20,11 +25,11 @@ class Turn:
 
     role: str
     content: str
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=_utc_now_timestamp)
 
     def __post_init__(self) -> None:
         if not self.timestamp:
-            self.timestamp = _utc_now_iso()
+            self.timestamp = _utc_now_timestamp()
 
 
 @dataclass
@@ -38,13 +43,3 @@ class State:
 
     observation: list[Turn]
     workflow_summary: str = ""
-
-
-def _utc_now_iso() -> str:
-    """Return current UTC time as ISO-8601 string."""
-    return (
-        datetime.now(timezone.utc)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )

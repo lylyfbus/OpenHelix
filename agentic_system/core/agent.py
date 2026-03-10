@@ -88,6 +88,7 @@ class Agent:
         self.model = model
         self.name = name
         self.allowed_actions = allowed_actions
+        self.last_prompt = ""
 
         if workspace is not None:
             from ..context.prompt_builder import PromptBuilder
@@ -110,6 +111,7 @@ class Agent:
             ActionParseError: If the model output fails parsing/validation.
         """
         prompt = self._build_prompt(state)
+        self.last_prompt = prompt
         raw_output = self.model.generate(
             prompt,
             stream=stream,

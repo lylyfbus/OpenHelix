@@ -12,6 +12,7 @@ Usage::
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -28,6 +29,17 @@ from .approval import ApprovalPolicy
 # --------------------------------------------------------------------------- #
 # Streaming display
 # --------------------------------------------------------------------------- #
+
+_JSON_ESCAPE_MAP = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
 
 
 def extract_streaming_response(partial_text: str) -> "str | None":
@@ -52,21 +64,53 @@ def extract_streaming_response(partial_text: str) -> "str | None":
     if not after_colon or after_colon[0] != '"':
         return None
 
-    # Extract string value (handle escaped quotes)
+    # Extract and decode the partial JSON string value.
     result_chars: list[str] = []
     i = 1  # skip opening quote
     while i < len(after_colon):
         ch = after_colon[i]
-        if ch == "\\" and i + 1 < len(after_colon):
-            result_chars.append(after_colon[i + 1])
-            i += 2
-            continue
+        if ch == "\\":
+            if i + 1 >= len(after_colon):
+                break
+            esc = after_colon[i + 1]
+            if esc in _JSON_ESCAPE_MAP:
+                result_chars.append(_JSON_ESCAPE_MAP[esc])
+                i += 2
+                continue
+            if esc == "u":
+                if i + 6 > len(after_colon):
+                    break
+                hex_value = after_colon[i + 2 : i + 6]
+                if not re.fullmatch(r"[0-9a-fA-F]{4}", hex_value):
+                    break
+                result_chars.append(chr(int(hex_value, 16)))
+                i += 6
+                continue
+            # Unknown or malformed escape; stop until more text arrives.
+            break
         if ch == '"':
             break
         result_chars.append(ch)
         i += 1
-
     return "".join(result_chars) if result_chars else None
+
+
+def _format_turn_dump(tag: str, turns: list[Turn]) -> str:
+    """Format a turn list for inspection in the REPL."""
+    if not turns:
+        body = "(empty)"
+    else:
+        body = "\n".join(
+            f"[{turn.timestamp}] {turn.role}> {turn.content}"
+            for turn in turns
+        )
+    return f"<{tag}>\n{body}\n</{tag}>"
+
+
+def _format_text_dump(tag: str, text: str) -> str:
+    """Format a plain text field for inspection in the REPL."""
+    body = text or "(empty)"
+    return f"<{tag}>\n{body}\n</{tag}>"
 
 
 class StreamingDisplay:
@@ -136,6 +180,8 @@ _TOOL_DEFAULTS = {
     "SEARXNG_BASE_URL": "http://127.0.0.1:8888",
 }
 
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 
 # --------------------------------------------------------------------------- #
 # Provider factory
@@ -162,6 +208,16 @@ def _create_provider(
     return OpenAICompatProvider(provider=name, model=model)
 
 
+def _normalize_session_id(session_id: str) -> str:
+    """Validate and normalize a session identifier."""
+    candidate = session_id.strip()
+    if not candidate or not _SESSION_ID_RE.fullmatch(candidate):
+        raise ValueError(
+            "session_id must match ^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        )
+    return candidate
+
+
 # --------------------------------------------------------------------------- #
 # RuntimeHost
 # --------------------------------------------------------------------------- #
@@ -184,6 +240,7 @@ class RuntimeHost:
 
     Args:
         workspace: Working directory for the agent session.
+        session_id: Optional session identifier used to resume/persist state.
         provider: LLM provider name ("ollama", "deepseek", "lmstudio", "zai", etc.).
         mode: Execution mode ("auto" or "controlled").
         model: Model name override (uses provider defaults if not specified).
@@ -198,6 +255,10 @@ class RuntimeHost:
         "Commands:",
         "  /help            Show this help.",
         "  /status          Show session status.",
+        "  /full_history    Show the full in-memory history.",
+        "  /observation     Show the current observation window.",
+        "  /workflow_summary  Show the current workflow summary.",
+        "  /last_prompt     Show the last prompt sent to the core agent.",
         "  /exit            Quit.",
     ])
 
@@ -205,6 +266,7 @@ class RuntimeHost:
         self,
         workspace: Path,
         *,
+        session_id: Optional[str] = None,
         provider: str = "ollama",
         mode: str = "controlled",
         model: Optional[str] = None,
@@ -216,6 +278,13 @@ class RuntimeHost:
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self.session_id = _normalize_session_id(session_id) if session_id else None
+        self.session_path = (
+            self.workspace / ".sessions" / f"{self.session_id}.json"
+            if self.session_id
+            else None
+        )
+        self._session_loaded = False
         self.provider_name = provider
         self.mode = mode
 
@@ -248,6 +317,8 @@ class RuntimeHost:
             executor=sandbox_executor,
             mode=mode,
         )
+        if self.session_path is not None:
+            self._session_loaded = self._env.load_session(self.session_path)
 
         # Wire model into environment for sub-agent delegation
         self._env.set_model_ref(self._model)
@@ -341,6 +412,11 @@ class RuntimeHost:
         if show_banner:
             print(f"Agentic System — provider={self.provider_name}, mode={self.mode}")
             print(f"Workspace: {self.workspace}")
+            if self.session_id:
+                state = "resumed" if self._session_loaded else "new"
+                print(f"Session: {self.session_id} ({state})")
+            else:
+                print("Session: ephemeral")
             print("Type /help for commands. Type /exit to quit.\n")
 
         try:
@@ -379,21 +455,26 @@ class RuntimeHost:
         # Record user turn
         self._env.record(Turn(role="user", content=user_text))
 
-        # Run agent loop (prints agent responses as they happen)
-        run_loop(
-            self._agent,
-            self._env,
-            on_turn_start=self._stream_display.reset,
-            on_turn_end=self._stream_display.finalize,
-            on_token_chunk=self._stream_display,
-        )
-
-        # Persist state after each interaction
-        self._env.save_session(self.workspace / ".session")
+        try:
+            # Run agent loop (prints agent responses as they happen)
+            run_loop(
+                self._agent,
+                self._env,
+                on_turn_start=self._stream_display.reset,
+                on_turn_end=self._stream_display.finalize,
+                on_token_chunk=self._stream_display,
+            )
+        except RuntimeError as exc:
+            message = f"Agent error: {exc}"
+            print(f"\nruntime> {message}")
+            self._env.record(Turn(role="runtime", content=message))
+        finally:
+            # Persist state after each interaction
+            self._persist_session()
 
     def _handle_command(self, command_line: str) -> Optional[str]:
         """Process slash commands. Returns None for exit, string for output."""
-        cmd = command_line.split()[0].lower()
+        cmd = command_line.strip().split()[0].lower()
 
         if cmd == "/exit":
             return None
@@ -401,6 +482,14 @@ class RuntimeHost:
             return self.HELP_TEXT
         if cmd == "/status":
             return self._status_text()
+        if cmd == "/full_history":
+            return _format_turn_dump("full_history", self._env.full_history)
+        if cmd == "/observation":
+            return _format_turn_dump("observation", self._env.observation)
+        if cmd == "/workflow_summary":
+            return _format_text_dump("workflow_summary", self._env.workflow_summary)
+        if cmd == "/last_prompt":
+            return _format_text_dump("last_prompt", self._agent.last_prompt or "(none yet)")
         return f"Unknown command: {cmd}. Use /help."
 
     def _status_text(self) -> str:
@@ -409,6 +498,8 @@ class RuntimeHost:
             f"provider={self.provider_name}",
             f"mode={self.mode}",
             f"workspace={self.workspace}",
+            f"session_id={self.session_id or 'none'}",
+            f"session_state={self._session_state()}",
             f"image_analysis={os.environ.get('IMAGE_ANALYSIS_PROVIDER', 'none')}"
             f"/{os.environ.get('IMAGE_ANALYSIS_MODEL', 'none')}",
             f"image_generation={os.environ.get('IMAGE_GENERATION_PROVIDER', 'none')}"
@@ -422,6 +513,18 @@ class RuntimeHost:
     def _shutdown(self) -> None:
         """Persist state before exit."""
         try:
-            self._env.save_session(self.workspace / ".session")
+            self._persist_session()
         except Exception:
             pass
+
+    def _persist_session(self) -> None:
+        """Persist session state when a named session is active."""
+        if self.session_path is None:
+            return
+        self._env.save_session(self.session_path)
+
+    def _session_state(self) -> str:
+        """Return a short user-visible description of current session mode."""
+        if self.session_id is None:
+            return "ephemeral"
+        return "loaded" if self._session_loaded else "new"

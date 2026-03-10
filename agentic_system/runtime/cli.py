@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Runtime workspace path",
     )
+    parser.add_argument(
+        "--session-id",
+        default=None,
+        help="Optional session identifier for loading and persisting conversation state",
+    )
 
     # Tool configuration
     tool_group = parser.add_argument_group(
@@ -96,6 +101,7 @@ def main(argv: list[str] = None) -> int:
 
     host = RuntimeHost(
         workspace=workspace,
+        session_id=args.session_id,
         provider=args.provider,
         mode=args.mode,
         model=args.model,
