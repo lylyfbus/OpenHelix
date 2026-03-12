@@ -1,4 +1,4 @@
-"""Phase 4 verification — Skills + Knowledge integration with the real workspace.
+"""Phase 4 verification — Skills + Knowledge integration for bootstrapped workspaces.
 
 Tests that the new framework correctly loads, formats, and injects
 the built-in skills and knowledge into the agent pipeline.
@@ -6,9 +6,10 @@ the built-in skills and knowledge into the agent pipeline.
 After the skills bundling change, the built-in skills live in
 ``agentic_system/builtin_skills/`` and are bootstrapped into the
 workspace at startup by RuntimeHost. These tests verify both the
-raw loader against the package source and the bootstrapped workspace.
+raw loader against the package source and bootstrapped temp workspaces.
 """
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -16,7 +17,7 @@ from pathlib import Path
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agentic_system.core.agent import _load_skills as load_skills, _parse_frontmatter, _parse_csv
+from agentic_system.core.agent import _load_skills as load_skills
 from agentic_system.core.agent import _load_knowledge_catalog as load_knowledge_catalog
 from agentic_system.core.agent import _build_system_prompt
 from agentic_system.core.action import Action, parse_action
@@ -28,7 +29,7 @@ from agentic_system.core.sandbox import sandbox_executor
 from agentic_system.runtime.approval import ApprovalPolicy
 from agentic_system.runtime.host import RuntimeHost
 
-# Path to the real workspace and builtin skills
+# Path to the package source and builtin skills
 WORKSPACE = Path(__file__).resolve().parent.parent
 BUILTIN_SKILLS = WORKSPACE / "agentic_system" / "builtin_skills"
 
@@ -88,13 +89,42 @@ def test_real_skill_metadata_fields():
     print("  Real skill metadata fields OK")
 
 
-def test_real_knowledge_loading():
-    """Verify knowledge catalog loads from real workspace."""
-    catalog = load_knowledge_catalog(WORKSPACE / "knowledge")
-    assert len(catalog) >= 1
-    assert catalog[0]["doc_id"] == "doc_c83ff4bad5ca"
-    assert catalog[0]["title"] == "Schema test"
-    print(f"  Real knowledge loading OK ({len(catalog)} docs)")
+def _create_workspace_knowledge(workspace: Path) -> None:
+    """Create a minimal knowledge catalog inside a temp workspace."""
+    docs_root = workspace / "knowledge" / "docs"
+    index_root = workspace / "knowledge" / "index"
+    docs_root.mkdir(parents=True, exist_ok=True)
+    index_root.mkdir(parents=True, exist_ok=True)
+
+    doc_id = "doc_c83ff4bad5ca"
+    (docs_root / f"{doc_id}.md").write_text(
+        "# Schema test\n\nKnowledge fixture for integration tests.\n",
+        encoding="utf-8",
+    )
+    catalog = [{
+        "doc_id": doc_id,
+        "title": "Schema test",
+        "path": f"knowledge/docs/{doc_id}.md",
+        "tags": ["test", "schema"],
+        "quality_score": 0.9,
+        "confidence": 0.95,
+    }]
+    (index_root / "catalog.json").write_text(
+        json.dumps(catalog, indent=2),
+        encoding="utf-8",
+    )
+
+
+def test_workspace_knowledge_loading():
+    """Verify knowledge catalog loads from a runtime workspace layout."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        _create_workspace_knowledge(workspace)
+        catalog = load_knowledge_catalog(workspace / "knowledge")
+        assert len(catalog) == 1
+        assert catalog[0]["doc_id"] == "doc_c83ff4bad5ca"
+        assert catalog[0]["title"] == "Schema test"
+        print(f"  Workspace knowledge loading OK ({len(catalog)} docs)")
 
 
 # =========================================================================== #
@@ -212,8 +242,8 @@ if __name__ == "__main__":
     test_real_skill_loading()
     test_real_skill_metadata_fields()
 
-    print("\n=== Knowledge Integration (Real Workspace) ===")
-    test_real_knowledge_loading()
+    print("\n=== Knowledge Integration ===")
+    test_workspace_knowledge_loading()
 
     print("\n=== Bootstrap ===")
     test_bootstrap_skills()

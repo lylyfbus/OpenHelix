@@ -327,9 +327,8 @@ docker container rm searxng
 
 ```text
 agentic_system/
-  core/           -> state, action, agent, environment, loop
-  runtime/        -> sandbox, approval, host, cli
-  context/        -> prompt building, skill loading, knowledge loading
+  core/           -> state, action, agent, environment, sandbox
+  runtime/        -> loop, approval, host, cli, display, debug
   providers/      -> ollama and OpenAI-compatible providers
   builtin_skills/ -> shipped skills bootstrapped into each workspace
   prompts/        -> system prompt templates

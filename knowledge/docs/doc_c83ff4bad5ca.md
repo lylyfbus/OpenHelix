@@ -1,3 +1,0 @@
-# Schema test
-
-body text
