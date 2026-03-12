@@ -20,7 +20,14 @@ import sys
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+except ImportError:  # pragma: no cover
+    PromptSession = None  # type: ignore[assignment]
+    KeyBindings = None  # type: ignore[assignment]
 
 from ..core.agent import Agent
 from ..core.environment import Environment
@@ -218,7 +225,14 @@ def _render_session_view_html(
             timestamp = str(turn.get("timestamp", "") or "")
             role = str(turn.get("role", "unknown") or "unknown")
             content = str(turn.get("content", "") or "")
-            lines.append(f"[{timestamp}] {role}> {content}")
+            prefix = f"[{timestamp}] {role}> "
+            content_lines = content.split("\n")
+            continuation = " " * len(prefix)
+            rendered = "\n".join(
+                [f"{prefix}{content_lines[0]}"]
+                + [f"{continuation}{cl}" for cl in content_lines[1:]]
+            )
+            lines.append(rendered)
         body_text = "\n".join(lines) if lines else "(empty)"
         return _render_text_view(
             eyebrow="Agentic System Timeline View",
@@ -544,6 +558,7 @@ class RuntimeHost:
         self._session_loaded = False
         self.provider_name = provider
         self.mode = mode
+        self._prompt_session = self._build_prompt_session()
 
         # 1. Bootstrap built-in skills into workspace
         self._bootstrap_skills()
@@ -586,6 +601,21 @@ class RuntimeHost:
         # Register approval policy as execution gate
         self._approval = ApprovalPolicy(mode=mode)
         self._env.on_before_execute(self._approval)
+
+    # ----- Input ------------------------------------------------------------- #
+
+    @staticmethod
+    def _build_prompt_session() -> object:
+        """Create multiline prompt session (Ctrl+D submits)."""
+        if PromptSession is None or KeyBindings is None:
+            return None
+        bindings = KeyBindings()
+
+        @bindings.add("c-d")
+        def _submit(event: Any) -> None:
+            event.app.exit(result=event.app.current_buffer.text)
+
+        return PromptSession(key_bindings=bindings)
 
     # ----- Bootstrap -------------------------------------------------------- #
 
@@ -677,13 +707,21 @@ class RuntimeHost:
                 print(f"Session: {self.session_id} ({state})")
             else:
                 print("Session: ephemeral")
-            print("Type /help for commands. Type /exit to quit.\n")
+            print("Type /help for commands. Type /exit to quit.")
+            print("Multiline: Enter adds lines, Ctrl+D submits, Ctrl+C cancels.\n")
 
         try:
             while True:
                 # Read user input
                 try:
-                    user_input = input("user> ").strip()
+                    if self._prompt_session is not None:
+                        user_input = self._prompt_session.prompt(
+                            "user> ",
+                            multiline=True,
+                            prompt_continuation=lambda _w, _n, _s: "... ",
+                        )
+                    else:
+                        user_input = input("user> ")
                 except EOFError:
                     print()
                     break

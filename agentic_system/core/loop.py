@@ -186,9 +186,11 @@ def _format_agent_record(action: Action) -> str:
             value = action.payload.get(key)
             if value:
                 text = str(value)
-                if key == "script" and len(text) > 200:
-                    text = text[:200] + "..."
-                lines.append(f"  {key}: {text}")
+                if "\n" in text:
+                    lines.append(f"  {key}:")
+                    lines.extend(f"    {row}" for row in text.split("\n"))
+                else:
+                    lines.append(f"  {key}: {text}")
         args = action.payload.get("script_args")
         if args:
             lines.append(f"  script_args: {args}")
@@ -204,9 +206,11 @@ def _format_agent_record(action: Action) -> str:
         context = action.payload.get("context")
         if context:
             text = str(context)
-            if len(text) > 200:
-                text = text[:200] + "..."
-            lines.append(f"  context: {text}")
+            if "\n" in text:
+                lines.append(f"  context:")
+                lines.extend(f"    {row}" for row in text.split("\n"))
+            else:
+                lines.append(f"  context: {text}")
         if len(lines) > 1:
             parts.append("\n".join(lines))
 
