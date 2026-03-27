@@ -570,7 +570,7 @@ if __name__ == "__main__":
     test_host_command_workflow_summary()
     test_host_command_last_prompt()
     test_host_command_last_prompt_empty()
-    test_host_command_views_require_session_id()
+    test_host_requires_session_id()
     test_host_command_exit()
     test_host_command_unknown()
 
@@ -583,7 +583,7 @@ if __name__ == "__main__":
 
     print("\n=== CLI Parser ===")
     test_cli_parser()
-    test_cli_parser_defaults()
+    test_cli_parser_requires_session_id()
     test_host_invalid_session_id()
 
     print("\n=== Streaming ===")
