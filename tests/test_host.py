@@ -157,13 +157,10 @@ def test_host_auto_prefers_docker_when_available():
             workspace: Path,
             *,
             session_id: str | None = None,
-            searxng_base_url: str | None = None,
         ):
             self.workspace = workspace
             self.session_id = session_id
-            self.searxng_base_url = searxng_base_url
             calls["session_id"] = session_id
-            calls["searxng_base_url"] = searxng_base_url
 
         def __call__(self, payload, workspace):
             return Turn(role="runtime", content="fake")
@@ -572,14 +569,12 @@ def test_cli_parser():
     args = parser.parse_args([
         "--provider", "deepseek",
         "--mode", "auto",
-        "--sandbox-backend", "docker",
         "--model", "deepseek-chat",
         "--workspace", "/tmp/test",
         "--session-id", "design-01",
     ])
     assert args.provider == "deepseek"
     assert args.mode == "auto"
-    assert args.sandbox_backend == "docker"
     assert args.model == "deepseek-chat"
     assert args.workspace == "/tmp/test"
     assert args.session_id == "design-01"

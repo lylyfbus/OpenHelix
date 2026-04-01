@@ -58,17 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Session identifier for loading and persisting conversation state",
     )
-    parser.add_argument(
-        "--sandbox-backend",
-        default="auto",
-        choices=["auto", "docker", "host"],
-        help="Exec backend: auto (docker first, host fallback), docker, or host (default: auto)",
-    )
-
     # Tool configuration
     tool_group = parser.add_argument_group(
         "tool configuration",
-        "Override default models and backends for built-in skill tools",
+        "Override default models for built-in skill tools",
     )
     tool_group.add_argument(
         "--image-analysis-provider",
@@ -90,12 +83,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Image generation model (default: x/z-image-turbo)",
     )
-    tool_group.add_argument(
-        "--searxng-base-url",
-        default=None,
-        help="SearXNG base URL for web search (default: http://127.0.0.1:8888)",
-    )
-
     return parser
 
 
@@ -110,13 +97,11 @@ def main(argv: list[str] = None) -> int:
         session_id=args.session_id,
         provider=args.provider,
         mode=args.mode,
-        sandbox_backend=args.sandbox_backend,
         model=args.model,
         image_analysis_provider=args.image_analysis_provider,
         image_analysis_model=args.image_analysis_model,
         image_generation_provider=args.image_generation_provider,
         image_generation_model=args.image_generation_model,
-        searxng_base_url=args.searxng_base_url,
     )
     return host.start()
 

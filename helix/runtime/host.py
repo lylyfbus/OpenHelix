@@ -53,7 +53,6 @@ _TOOL_DEFAULTS = {
     "IMAGE_ANALYSIS_MODEL": "glm-ocr",
     "IMAGE_GENERATION_PROVIDER": "ollama",
     "IMAGE_GENERATION_MODEL": "x/z-image-turbo",
-    "SEARXNG_BASE_URL": "http://127.0.0.1:8888",
 }
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -103,13 +102,12 @@ class RuntimeHost:
         session_id: Session identifier used to resume/persist project state.
         provider: LLM provider name ("ollama", "deepseek", "lmstudio", "zai", etc.).
         mode: Execution mode ("auto" or "controlled").
-        sandbox_backend: Exec backend selection ("auto", "docker", or "host").
+        sandbox_backend: Internal/testing override for the exec backend.
         model: Model name override (uses provider defaults if not specified).
         image_analysis_provider: Override for IMAGE_ANALYSIS_PROVIDER.
         image_analysis_model: Override for IMAGE_ANALYSIS_MODEL.
         image_generation_provider: Override for IMAGE_GENERATION_PROVIDER.
         image_generation_model: Override for IMAGE_GENERATION_MODEL.
-        searxng_base_url: Override for SEARXNG_BASE_URL.
     """
 
     HELP_TEXT = "\n".join([
@@ -130,13 +128,12 @@ class RuntimeHost:
         session_id: Optional[str] = None,
         provider: str = "ollama",
         mode: str = "controlled",
-        sandbox_backend: str = "auto",
+        sandbox_backend: str = "docker",
         model: Optional[str] = None,
         image_analysis_provider: Optional[str] = None,
         image_analysis_model: Optional[str] = None,
         image_generation_provider: Optional[str] = None,
         image_generation_model: Optional[str] = None,
-        searxng_base_url: Optional[str] = None,
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -153,8 +150,8 @@ class RuntimeHost:
         self._session_loaded = False
         self.provider_name = provider
         self.mode = mode
-        self.requested_sandbox_backend = str(sandbox_backend).strip().lower() or "auto"
-        self.resolved_sandbox_backend = "host"
+        self.requested_sandbox_backend = str(sandbox_backend).strip().lower() or "docker"
+        self.resolved_sandbox_backend = "docker"
         self._sandbox_status_fields: dict[str, str] = {}
         self._prompt_session = self._build_prompt_session()
 
@@ -167,7 +164,6 @@ class RuntimeHost:
             image_analysis_model=image_analysis_model,
             image_generation_provider=image_generation_provider,
             image_generation_model=image_generation_model,
-            searxng_base_url=searxng_base_url,
         )
 
         # 3. Build components
@@ -189,7 +185,6 @@ class RuntimeHost:
 
         sandbox_executor = self._resolve_sandbox_executor(
             sandbox_backend=self.requested_sandbox_backend,
-            searxng_base_url=searxng_base_url,
         )
         self._sandbox_executor = sandbox_executor
 
@@ -288,7 +283,6 @@ class RuntimeHost:
         image_analysis_model: Optional[str] = None,
         image_generation_provider: Optional[str] = None,
         image_generation_model: Optional[str] = None,
-        searxng_base_url: Optional[str] = None,
     ) -> None:
         """Set environment variables for skill scripts to read.
 
@@ -306,7 +300,6 @@ class RuntimeHost:
             "IMAGE_ANALYSIS_MODEL": image_analysis_model,
             "IMAGE_GENERATION_PROVIDER": image_generation_provider,
             "IMAGE_GENERATION_MODEL": image_generation_model,
-            "SEARXNG_BASE_URL": searxng_base_url,
         }
         for key, value in overrides.items():
             if value is not None and value.strip():
@@ -445,7 +438,6 @@ class RuntimeHost:
         self,
         *,
         sandbox_backend: str,
-        searxng_base_url: Optional[str],
     ) -> object:
         """Resolve the configured sandbox backend into a callable executor."""
         backend = str(sandbox_backend).strip().lower() or "auto"
@@ -462,7 +454,6 @@ class RuntimeHost:
                 executor = DockerSandboxExecutor(
                     self.workspace,
                     session_id=self.session_id,
-                    searxng_base_url=searxng_base_url,
                 )
                 prepare_runtime = getattr(executor, "prepare_runtime", None)
                 if callable(prepare_runtime):

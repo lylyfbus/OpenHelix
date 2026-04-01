@@ -53,7 +53,7 @@ You need four things:
 1. a workspace directory
 2. a session id
 3. an LLM provider
-4. optional tool backends if you want search or image skills
+4. optional image-skill model overrides if you do not want the defaults
 
 ### Full-Featured Example
 
@@ -135,7 +135,6 @@ helix --workspace . --session-id bugfix-02
 | `--provider` | `ollama` | core model provider |
 | `--mode` | `controlled` | `controlled` asks before exec, `auto` does not |
 | `--model` | provider default | override the provider's default model |
-| `--searxng-base-url` | `http://127.0.0.1:8888` | search backend URL |
 
 Provider model defaults when `--model` is omitted:
 
@@ -191,7 +190,7 @@ Precedence is:
 | `IMAGE_GENERATION_MODEL` | image-generation skill | default set by runtime to `x/z-image-turbo` |
 | `IMAGE_GENERATION_BASE_URL` | image-generation skill | optional explicit override |
 | `IMAGE_GENERATION_API_KEY` | image-generation skill | optional explicit override |
-| `SEARXNG_BASE_URL` | search-online-context skill | default set by runtime to `http://127.0.0.1:8888` |
+| `SEARXNG_BASE_URL` | search-online-context skill | injected automatically by the Docker runtime for sandboxed search execs |
 
 ### Runtime Controls
 
@@ -248,73 +247,17 @@ If those models are not available locally, change them with CLI flags or env var
 
 ### Web Search: SearXNG
 
-The search skill uses an external SearXNG instance. The runtime does not start it for you.
+The app manages SearXNG for you through Docker when the Docker sandbox is active.
 
-Default URL:
+For normal app usage you do not need to:
 
-```text
-http://127.0.0.1:8888
-```
+- pass a search backend URL
+- start a separate local SearXNG container
+- wire search execs to a host port
 
-Minimal local setup with Docker:
+At startup the runtime prepares the Docker sandbox image, Docker network, cache volume, and the managed SearXNG sidecar. Search execs then receive the correct internal `SEARXNG_BASE_URL` automatically.
 
-1. Pull the image:
-
-```bash
-docker pull docker.io/searxng/searxng:latest
-```
-
-2. Create config and data directories:
-
-```bash
-mkdir -p ./searxng/config ./searxng/data
-```
-
-3. Create `./searxng/config/settings.yml`:
-
-```yaml
-use_default_settings: true
-
-server:
-  secret_key: "change-this-to-a-random-string"
-  limiter: false
-
-search:
-  safe_search: 0
-  formats:
-    - html
-    - json
-```
-
-4. Start SearXNG:
-
-```bash
-docker run --name searxng -d \
-  -p 8888:8080 \
-  -v "./searxng/config:/etc/searxng" \
-  -v "./searxng/data:/var/cache/searxng" \
-  docker.io/searxng/searxng:latest
-```
-
-5. Verify it:
-
-```bash
-curl http://127.0.0.1:8888
-curl 'http://127.0.0.1:8888/search?q=test&format=json'
-```
-
-If you already have SearXNG elsewhere:
-
-```bash
-helix --workspace . --session-id my-session --searxng-base-url http://your-host:port
-```
-
-Stop the local container with:
-
-```bash
-docker container stop searxng
-docker container rm searxng
-```
+Manual `SEARXNG_BASE_URL` setup only matters if you run the search scripts outside the Helix runtime.
 
 ## Troubleshooting
 
