@@ -1,7 +1,7 @@
 """CLI entrypoint for the agentic framework.
 
-Launches the RuntimeHost with provider, mode, model, workspace,
-and tool configuration from command-line arguments.
+Launches the RuntimeHost with provider, mode, model, and workspace
+from command-line arguments.
 
 Usage::
 
@@ -58,31 +58,6 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Session identifier for loading and persisting conversation state",
     )
-    # Tool configuration
-    tool_group = parser.add_argument_group(
-        "tool configuration",
-        "Override default models for built-in skill tools",
-    )
-    tool_group.add_argument(
-        "--image-analysis-provider",
-        default=None,
-        help="Image analysis provider (default: ollama)",
-    )
-    tool_group.add_argument(
-        "--image-analysis-model",
-        default=None,
-        help="Image analysis model (default: glm-ocr)",
-    )
-    tool_group.add_argument(
-        "--image-generation-provider",
-        default=None,
-        help="Image generation provider (default: ollama)",
-    )
-    tool_group.add_argument(
-        "--image-generation-model",
-        default=None,
-        help="Image generation model (default: x/z-image-turbo)",
-    )
     return parser
 
 
@@ -98,10 +73,6 @@ def main(argv: list[str] = None) -> int:
         provider=args.provider,
         mode=args.mode,
         model=args.model,
-        image_analysis_provider=args.image_analysis_provider,
-        image_analysis_model=args.image_analysis_model,
-        image_generation_provider=args.image_generation_provider,
-        image_generation_model=args.image_generation_model,
     )
     return host.start()
 

@@ -3,9 +3,8 @@
 from .state import State, Turn
 from .action import Action, parse_action, ActionParseError
 from .agent import Agent
-from .docker_sandbox import DockerSandboxExecutor, docker_is_available
 from .environment import Environment
-from .sandbox import sandbox_executor
+from .sandbox import DockerSandboxExecutor, docker_is_available, sandbox_executor
 
 __all__ = [
     "State",

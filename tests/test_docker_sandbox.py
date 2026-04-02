@@ -1,12 +1,14 @@
 """Docker sandbox integration tests."""
 
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from helix.core.docker_sandbox import DockerSandboxExecutor, docker_is_available
+from helix.core.sandbox import DockerSandboxExecutor, docker_is_available
+from helix.core.local_model_service import LocalModelServiceManager
 
 
 def _docker_ready() -> bool:
@@ -194,6 +196,57 @@ def test_docker_sandbox_managed_searxng_returns_json():
             print("  Docker sandbox managed SearXNG JSON OK")
         finally:
             executor.shutdown()
+
+
+def test_docker_sandbox_image_skill_can_reach_local_model_service():
+    if not _docker_ready() or sys.platform != "darwin":
+        return
+
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        skills_root = workspace / "skills" / "all-agents"
+        skills_root.mkdir(parents=True, exist_ok=True)
+        source_skill = (
+            Path(__file__).resolve().parent.parent
+            / "helix"
+            / "builtin_skills"
+            / "all-agents"
+            / "generate-image-from-pytorch"
+        )
+        shutil.copytree(source_skill, skills_root / "generate-image-from-pytorch")
+        manager = LocalModelServiceManager(
+            workspace,
+            session_id="docker-image-skill",
+            cache_root=workspace / ".runtime" / "test-local-model-cache",
+            backend_mode="fake",
+        )
+        try:
+            manager.start()
+        except PermissionError:
+            return
+        executor = DockerSandboxExecutor(workspace, searxng_base_url="https://example.com")
+        executor.attach_local_model_service(manager.tool_environment())
+        try:
+            turn = executor(
+                {
+                    "job_name": "docker-image-skill",
+                    "code_type": "python",
+                    "script_path": "skills/all-agents/generate-image-from-pytorch/scripts/generate_image_from_pytorch.py",
+                    "script_args": [
+                        "--prompt", "A minimal test image",
+                        "--output-dir", "generated_images",
+                    ],
+                },
+                workspace,
+            )
+            assert "succeeded" in turn.content
+            assert "generated_images/" in turn.content
+            generated = list((workspace / "generated_images").glob("*.png"))
+            assert generated, "expected generated image file"
+            print("  Docker image skill local-model-service reachability OK")
+        finally:
+            executor.shutdown()
+            manager.stop()
 
 
 if __name__ == "__main__":

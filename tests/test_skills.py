@@ -13,6 +13,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -25,9 +26,32 @@ from helix.core.environment import Environment
 from helix.core.agent import Agent
 from helix.core.state import Turn
 from helix.runtime.loop import run_loop
-from helix.core.sandbox import sandbox_executor
+from helix.core.sandbox import docker_is_available, sandbox_executor
 from helix.runtime.approval import ApprovalPolicy
 from helix.runtime.host import RuntimeHost
+
+class _FakeDockerExecutor:
+    approval_profile = "docker-online-rw-workspace-v1:test"
+
+    def __init__(self, workspace: Path, *, session_id: str | None = None):
+        self.workspace = workspace
+        self.session_id = session_id
+
+    def __call__(self, payload, workspace):
+        return Turn(role="runtime", content="fake")
+
+    def prepare_runtime(self) -> None:
+        pass
+
+    def shutdown(self) -> None:
+        pass
+
+    def status_fields(self) -> dict[str, str]:
+        return {"sandbox_backend": "docker", "docker_image": "fake-image"}
+
+    def tool_environment(self) -> dict[str, str]:
+        return {"SEARXNG_BASE_URL": "http://fake-searxng:8080"}
+
 
 # Path to the package source and builtin skills
 WORKSPACE = Path(__file__).resolve().parent.parent
@@ -35,9 +59,20 @@ BUILTIN_SKILLS = WORKSPACE / "helix" / "builtin_skills"
 
 
 def _make_host(workspace: Path, **kwargs) -> RuntimeHost:
-    params = {"workspace": workspace, "session_id": "skills-01", "sandbox_backend": "host"}
+    params = {"workspace": workspace, "session_id": "skills-01"}
     params.update(kwargs)
-    return RuntimeHost(**params)
+    with patch("helix.runtime.host.docker_is_available", return_value=(True, "")):
+        with patch("helix.runtime.host.DockerSandboxExecutor", _FakeDockerExecutor):
+            with patch("helix.runtime.host.local_model_service_supported", return_value=False):
+                return RuntimeHost(**params)
+
+
+def _docker_ready() -> bool:
+    available, reason = docker_is_available()
+    if not available:
+        print(f"  Docker unavailable, skipping skills exec test: {reason}")
+        return False
+    return True
 
 
 # =========================================================================== #
@@ -52,8 +87,8 @@ def test_real_skill_loading():
 
     # Should find all 9 built-in skills (7 non-loader + 2 loaders)
     assert "search-online-context" in skill_ids, f"Missing search-online-context, got: {skill_ids}"
-    assert "image-generation" in skill_ids
-    assert "image-understanding" in skill_ids
+    assert "generate-image-from-pytorch" in skill_ids
+    assert "analyze-image-from-pytorch" in skill_ids
     assert "documentation-distillation" in skill_ids
     assert "file-based-planning" in skill_ids
     assert "skill-creation" in skill_ids
@@ -144,7 +179,7 @@ def test_bootstrap_skills():
         skill_dirs = sorted(p.name for p in ws_skills.iterdir() if p.is_dir())
         assert len(skill_dirs) == 9, f"Expected 9, got {len(skill_dirs)}: {skill_dirs}"
         assert "search-online-context" in skill_dirs
-        assert "image-generation" in skill_dirs
+        assert "generate-image-from-pytorch" in skill_dirs
         assert "load-skill" in skill_dirs
         print(f"  Bootstrap skills OK ({len(skill_dirs)} skills synced)")
 
@@ -158,7 +193,7 @@ def test_bootstrapped_prompt_builder():
         assert prompt, "Empty system prompt"
         assert len(prompt) > 500, f"System prompt too short ({len(prompt)} chars)"
         assert "search-online-context" in prompt
-        assert "image-generation" in prompt
+        assert "generate-image-from-pytorch" in prompt
         assert "load-skill" in prompt
         assert "load-knowledge-docs" not in prompt
 
@@ -172,6 +207,8 @@ def test_bootstrapped_prompt_builder():
 
 def test_full_pipeline_with_skill_exec():
     """End-to-end: PromptBuilder builds prompt, Agent acts, Loop executes."""
+    if not _docker_ready():
+        return
     with tempfile.TemporaryDirectory() as td:
         host = _make_host(Path(td))
         system_prompt = _build_system_prompt(Path(td), "core_agent")

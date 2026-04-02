@@ -53,7 +53,7 @@ You need four things:
 1. a workspace directory
 2. a session id
 3. an LLM provider
-4. optional image-skill model overrides if you do not want the defaults
+4. Docker available if you want the managed sandbox and tool services
 
 ### Full-Featured Example
 
@@ -63,10 +63,6 @@ helix \
   --provider zai \
   --model glm-5 \
   --mode auto \
-  --image-analysis-provider ollama \
-  --image-analysis-model glm-ocr \
-  --image-generation-provider ollama \
-  --image-generation-model x/z-image-turbo \
   --session-id test_session
 ```
 
@@ -75,18 +71,15 @@ This launches an agent session with:
 - `--workspace` — the project directory the agent works in
 - `--provider` / `--model` — the core LLM that drives reasoning
 - `--mode auto` — the agent executes without asking for approval (`controlled` prompts before each action)
-- `--image-analysis-*` / `--image-generation-*` — models for built-in image skills
 - `--session-id` — required; names the session so conversation state persists across restarts
 
 ### Minimal Local Setup: Ollama
 
-If you want to run everything locally with Ollama:
+If you want to run the reasoning model locally with Ollama:
 
 ```bash
 ollama serve
 ollama pull llama3.1:8b
-ollama pull glm-ocr
-ollama pull x/z-image-turbo
 ```
 
 ```bash
@@ -157,23 +150,21 @@ Precedence is:
 
 | Variable | Used by | Default / Notes |
 |---|---|---|
-| `OLLAMA_BASE_URL` | core provider, image skills | `http://localhost:11434` for the core provider |
+| `OLLAMA_BASE_URL` | core provider | `http://localhost:11434` for the core provider |
 | `OLLAMA_MODEL` | core provider | `llama3.1:8b` |
 | `OLLAMA_TIMEOUT_SECONDS` | core provider | `300` |
 | `OLLAMA_KEEP_ALIVE` | core provider | optional Ollama keep-alive duration |
-| `OLLAMA_API_KEY` | image generation only | optional; used only by the image-generation script |
-| `DEEPSEEK_BASE_URL` | deepseek provider, image skills | `https://api.deepseek.com` |
-| `DEEPSEEK_API_KEY` | deepseek provider, image skills | required for `--provider deepseek` unless `OPENAI_COMPAT_API_KEY` is set |
+| `DEEPSEEK_BASE_URL` | deepseek provider | `https://api.deepseek.com` |
+| `DEEPSEEK_API_KEY` | deepseek provider | required for `--provider deepseek` unless `OPENAI_COMPAT_API_KEY` is set |
 | `DEEPSEEK_MODEL` | deepseek provider | `deepseek-chat` |
-| `LMSTUDIO_BASE_URL` | lmstudio provider, image skills | `http://localhost:1234/v1` |
-| `LMSTUDIO_API_KEY` | lmstudio provider, image skills | optional |
+| `LMSTUDIO_BASE_URL` | lmstudio provider | `http://localhost:1234/v1` |
+| `LMSTUDIO_API_KEY` | lmstudio provider | optional |
 | `LMSTUDIO_MODEL` | lmstudio provider | `local-model` |
-| `LM_API_TOKEN` | image skills | fallback token for LM Studio / generic OpenAI-compatible image calls |
-| `ZAI_BASE_URL` | zai provider, image skills | `https://api.z.ai/api/paas/v4` |
-| `ZAI_API_KEY` | zai provider, image skills | required for `--provider zai` unless `OPENAI_COMPAT_API_KEY` is set |
+| `ZAI_BASE_URL` | zai provider | `https://api.z.ai/api/paas/v4` |
+| `ZAI_API_KEY` | zai provider | required for `--provider zai` unless `OPENAI_COMPAT_API_KEY` is set |
 | `ZAI_MODEL` | zai provider | `glm-5` |
-| `OPENAI_COMPAT_BASE_URL` | generic OpenAI-compatible provider, image skills | generic fallback base URL |
-| `OPENAI_COMPAT_API_KEY` | generic OpenAI-compatible provider, zai/deepseek fallback, image skills | generic fallback API key |
+| `OPENAI_COMPAT_BASE_URL` | generic OpenAI-compatible provider | generic fallback base URL |
+| `OPENAI_COMPAT_API_KEY` | generic OpenAI-compatible provider, zai/deepseek fallback | generic fallback API key |
 | `OPENAI_COMPAT_MODEL` | generic OpenAI-compatible provider | `local-model` |
 | `OPENAI_COMPAT_TIMEOUT_SECONDS` | generic OpenAI-compatible provider | `300` |
 
@@ -181,16 +172,9 @@ Precedence is:
 
 | Variable | Used by | Default / Notes |
 |---|---|---|
-| `IMAGE_ANALYSIS_PROVIDER` | image-understanding skill | default set by runtime to `ollama` |
-| `IMAGE_ANALYSIS_MODEL` | image-understanding skill | default set by runtime to `glm-ocr` |
-| `IMAGE_ANALYSIS_BASE_URL` | image-understanding skill | optional explicit override |
-| `IMAGE_ANALYSIS_API_KEY` | image-understanding skill | optional explicit override |
-| `IMAGE_ANALYSIS_TIMEOUT_SECONDS` | image-understanding skill | `120` |
-| `IMAGE_GENERATION_PROVIDER` | image-generation skill | default set by runtime to `ollama` |
-| `IMAGE_GENERATION_MODEL` | image-generation skill | default set by runtime to `x/z-image-turbo` |
-| `IMAGE_GENERATION_BASE_URL` | image-generation skill | optional explicit override |
-| `IMAGE_GENERATION_API_KEY` | image-generation skill | optional explicit override |
 | `SEARXNG_BASE_URL` | search-online-context skill | injected automatically by the Docker runtime for sandboxed search execs |
+| `HELIX_LOCAL_MODEL_SERVICE_URL` | local PyTorch image skills | injected automatically by the Docker runtime on macOS Apple Silicon |
+| `HELIX_LOCAL_MODEL_SERVICE_TOKEN` | local PyTorch image skills | injected automatically by the Docker runtime on macOS Apple Silicon |
 
 ### Runtime Controls
 
@@ -238,12 +222,12 @@ The inspection commands operate on the active named session.
 
 ### Image Skills
 
-If you use the built-in image skills, the runtime defaults are:
+The built-in image capabilities are skill-owned rather than CLI-configured:
 
-- image analysis: `ollama` + `glm-ocr`
-- image generation: `ollama` + `x/z-image-turbo`
+- `analyze-image-from-pytorch` uses `zai-org/GLM-OCR`
+- `generate-image-from-pytorch` uses `Tongyi-MAI/Z-Image-Turbo`
 
-If those models are not available locally, change them with CLI flags or env vars before startup.
+On macOS Apple Silicon, the Docker runtime starts a narrow host-native local model service and injects the service URL/token into Docker execs automatically. The core Helix CLI does not expose separate image provider/model flags.
 
 ### Web Search: SearXNG
 

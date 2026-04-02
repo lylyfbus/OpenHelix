@@ -28,10 +28,40 @@ from helix.providers.openai_compat import OpenAICompatProvider
 WORKSPACE = Path(__file__).resolve().parent.parent
 
 
+class _FakeDockerExecutor:
+    approval_profile = "docker-online-rw-workspace-v1:test"
+
+    def __init__(self, workspace: Path, *, session_id: str | None = None):
+        self.workspace = workspace
+        self.session_id = session_id
+
+    def __call__(self, payload, workspace):
+        return Turn(role="runtime", content="fake")
+
+    def prepare_runtime(self) -> None:
+        pass
+
+    def shutdown(self) -> None:
+        pass
+
+    def status_fields(self) -> dict[str, str]:
+        return {
+            "sandbox_backend": "docker",
+            "sandbox_profile": self.approval_profile,
+            "docker_image": "fake-image",
+        }
+
+    def tool_environment(self) -> dict[str, str]:
+        return {"SEARXNG_BASE_URL": "http://fake-searxng:8080"}
+
+
 def _make_host(workspace: Path, **kwargs) -> RuntimeHost:
-    params = {"workspace": workspace, "session_id": "session-01", "sandbox_backend": "host"}
+    params = {"workspace": workspace, "session_id": "session-01"}
     params.update(kwargs)
-    return RuntimeHost(**params)
+    with patch("helix.runtime.host.docker_is_available", return_value=(True, "")):
+        with patch("helix.runtime.host.DockerSandboxExecutor", _FakeDockerExecutor):
+            with patch("helix.runtime.host.local_model_service_supported", return_value=False):
+                return RuntimeHost(**params)
 
 
 # =========================================================================== #
@@ -128,12 +158,11 @@ def test_host_init_with_session_id_loads_existing_state():
         raw["last_prompt"] = "Prior prompt"
         session_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
-        host = RuntimeHost(
+        host = _make_host(
             workspace=workspace,
             provider="ollama",
             mode="auto",
             session_id="review-01",
-            sandbox_backend="host",
         )
 
         assert host.session_id == "review-01"
@@ -145,8 +174,8 @@ def test_host_init_with_session_id_loads_existing_state():
         print("  RuntimeHost named session resume OK")
 
 
-def test_host_auto_prefers_docker_when_available():
-    """Verify auto backend selects Docker when Docker is available."""
+def test_host_uses_docker_when_available():
+    """Verify the runtime host uses the Docker sandbox when available."""
     calls: dict[str, object] = {}
 
     class FakeDockerExecutor:
@@ -183,34 +212,100 @@ def test_host_auto_prefers_docker_when_available():
                 host = RuntimeHost(
                     workspace=Path(td),
                     session_id="session-01",
-                    sandbox_backend="auto",
                 )
-        assert host.resolved_sandbox_backend == "docker(auto)"
+        assert host.resolved_sandbox_backend == "docker"
         assert host._env.approval_profile == "docker-online-rw-workspace-v1:test"
         assert os.environ["SEARXNG_BASE_URL"] == "http://fake-searxng:8080"
         assert calls["session_id"] == "session-01"
         assert calls["prepared"] is True
         host._shutdown()
         assert calls["shutdown"] is True
-        print("  RuntimeHost auto docker selection OK")
+        print("  RuntimeHost Docker selection OK")
 
 
-def test_host_auto_falls_back_to_host_when_docker_unavailable():
-    """Verify auto backend falls back to the host executor when Docker is unavailable."""
+def test_host_docker_starts_local_model_service_when_supported():
+    """Verify Docker startup wires the local model service when supported."""
+    calls: dict[str, object] = {}
+
+    class FakeDockerExecutor:
+        approval_profile = "docker-online-rw-workspace-v1:test"
+
+        def __init__(self, workspace: Path, *, session_id: str | None = None):
+            self.workspace = workspace
+            self.session_id = session_id
+
+        def __call__(self, payload, workspace):
+            return Turn(role="runtime", content="fake")
+
+        def attach_local_model_service(self, env: dict[str, str]) -> None:
+            calls["service_env"] = env
+
+        def prepare_runtime(self) -> None:
+            calls["prepared"] = True
+
+        def shutdown(self) -> None:
+            calls["shutdown"] = True
+
+        def status_fields(self) -> dict[str, str]:
+            return {"sandbox_backend": "docker", "docker_image": "fake-image"}
+
+        def tool_environment(self) -> dict[str, str]:
+            return {"SEARXNG_BASE_URL": "http://fake-searxng:8080"}
+
+    class FakeLocalModelService:
+        def __init__(self, workspace: Path, *, session_id: str):
+            calls["workspace"] = workspace
+            calls["session_id"] = session_id
+
+        def start(self) -> None:
+            calls["service_started"] = True
+
+        def stop(self) -> None:
+            calls["service_stopped"] = True
+
+        def tool_environment(self) -> dict[str, str]:
+            return {
+                "HELIX_LOCAL_MODEL_SERVICE_URL": "http://host.docker.internal:9999",
+                "HELIX_LOCAL_MODEL_SERVICE_TOKEN": "secret-token",
+            }
+
+    with tempfile.TemporaryDirectory() as td:
+        with patch("helix.runtime.host.docker_is_available", return_value=(True, "")):
+            with patch("helix.runtime.host.DockerSandboxExecutor", FakeDockerExecutor):
+                with patch("helix.runtime.host.local_model_service_supported", return_value=True):
+                    with patch("helix.runtime.host.LocalModelServiceManager", FakeLocalModelService):
+                        host = RuntimeHost(
+                            workspace=Path(td),
+                            session_id="session-01",
+                        )
+        assert calls["service_started"] is True
+        assert calls["prepared"] is True
+        assert calls["service_env"] == {
+            "HELIX_LOCAL_MODEL_SERVICE_URL": "http://host.docker.internal:9999",
+            "HELIX_LOCAL_MODEL_SERVICE_TOKEN": "secret-token",
+        }
+        host._shutdown()
+        assert calls["shutdown"] is True
+        assert calls["service_stopped"] is True
+        print("  RuntimeHost local model service startup OK")
+
+
+def test_host_requires_docker_when_unavailable():
+    """Verify the runtime host now errors when Docker is unavailable."""
     with tempfile.TemporaryDirectory() as td:
         with patch(
             "helix.runtime.host.docker_is_available",
             return_value=(False, "docker unavailable"),
         ):
-            host = RuntimeHost(
-                workspace=Path(td),
-                session_id="session-01",
-                sandbox_backend="auto",
-            )
-        assert host.resolved_sandbox_backend == "host(auto-fallback)"
-        assert host._env.approval_profile == "host-subprocess-v1"
-        assert "docker unavailable" in host._status_text()
-        print("  RuntimeHost auto host fallback OK")
+            try:
+                RuntimeHost(
+                    workspace=Path(td),
+                    session_id="session-01",
+                )
+                assert False, "Expected Docker-unavailable startup to raise"
+            except ValueError as exc:
+                assert "Docker sandbox unavailable: docker unavailable" in str(exc)
+        print("  RuntimeHost Docker requirement OK")
 
 
 # =========================================================================== #
@@ -236,13 +331,15 @@ def test_host_command_status():
         assert "provider=" in result
         assert "mode=" in result
         assert "session_state=new" in result
+        assert "image_analysis=" not in result
+        assert "image_generation=" not in result
         print("  /status command OK")
 
 
 def test_host_command_full_history():
     """Verify /full_history opens a raw timeline view."""
     with tempfile.TemporaryDirectory() as td:
-        host = RuntimeHost(workspace=Path(td), session_id="debug-01", sandbox_backend="host")
+        host = _make_host(Path(td), session_id="debug-01")
         host._env.record(Turn(
             role="user",
             content="Hello",
@@ -263,7 +360,7 @@ def test_host_command_full_history():
 def test_host_command_observation():
     """Verify /observation opens a raw timeline view."""
     with tempfile.TemporaryDirectory() as td:
-        host = RuntimeHost(workspace=Path(td), session_id="debug-01", sandbox_backend="host")
+        host = _make_host(Path(td), session_id="debug-01")
         host._env.record(Turn(role="user", content="Hello"))
         with patch("helix.runtime.host.open_file_in_viewer", return_value=True):
             result = host._handle_command("/observation")
@@ -280,7 +377,7 @@ def test_host_command_observation():
 def test_host_command_workflow_summary():
     """Verify /workflow_summary opens a session-scoped HTML view."""
     with tempfile.TemporaryDirectory() as td:
-        host = RuntimeHost(workspace=Path(td), session_id="debug-01", sandbox_backend="host")
+        host = _make_host(Path(td), session_id="debug-01")
         host._env.workflow_summary = "## Current Status\nWorking"
         with patch("helix.runtime.host.open_file_in_viewer", return_value=True):
             result = host._handle_command("/workflow_summary")
@@ -295,7 +392,7 @@ def test_host_command_workflow_summary():
 def test_host_command_last_prompt():
     """Verify /last_prompt opens the raw prompt text exactly as sent to the model."""
     with tempfile.TemporaryDirectory() as td:
-        host = RuntimeHost(workspace=Path(td), session_id="debug-01", sandbox_backend="host")
+        host = _make_host(Path(td), session_id="debug-01")
         host._agent.last_prompt = "system\n\n<latest_context>\n[user] Hello\n</latest_context>"
         with patch("helix.runtime.host.open_file_in_viewer", return_value=True):
             result = host._handle_command("/last_prompt")
@@ -313,7 +410,7 @@ def test_host_command_last_prompt():
 def test_host_command_last_prompt_empty():
     """Verify /last_prompt writes a placeholder HTML view before first use."""
     with tempfile.TemporaryDirectory() as td:
-        host = RuntimeHost(workspace=Path(td), session_id="debug-01", sandbox_backend="host")
+        host = _make_host(Path(td), session_id="debug-01")
         with patch("helix.runtime.host.open_file_in_viewer", return_value=False):
             result = host._handle_command("/last_prompt")
         path = Path(td) / "sessions" / "debug-01" / ".state" / "views" / "debug-01.last_prompt.html"
@@ -411,7 +508,7 @@ def test_host_process_message_saves_named_session():
     """Verify named sessions persist after each interaction."""
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        host = RuntimeHost(workspace=workspace, session_id="active-1", sandbox_backend="host")
+        host = _make_host(workspace, session_id="active-1")
 
         mock_generate = MagicMock(return_value=(
             '<output>'
@@ -438,6 +535,15 @@ def test_host_process_exec():
     """Test that _process_message handles exec actions correctly."""
     with tempfile.TemporaryDirectory() as td:
         host = _make_host(Path(td), mode="auto")
+        host._env._executor = lambda _payload, _workspace: Turn(
+            role="runtime",
+            content=(
+                "Job 'test-exec' succeeded. (Exit code: 0)"
+                "\n\n<stdout>\n"
+                "test-output\n"
+                "</stdout>"
+            ),
+        )
 
         call_count = [0]
         def mock_generate(prompt, *, stream=False, chunk_callback=None):

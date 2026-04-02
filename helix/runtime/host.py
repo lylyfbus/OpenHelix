@@ -11,6 +11,7 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -26,10 +27,10 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 
 from ..core.agent import Agent
-from ..core.docker_sandbox import DockerSandboxExecutor, docker_is_available
 from ..core.environment import Environment
+from ..core.local_model_service import LocalModelServiceManager, local_model_service_supported
 from ..core.state import Turn
-from ..core.sandbox import sandbox_executor as host_sandbox_executor
+from ..core.sandbox import DockerSandboxExecutor, docker_is_available
 from ..providers import create_provider
 from .loop import run_loop
 from .approval import ApprovalPolicy
@@ -47,13 +48,6 @@ _BUILTIN_SKILLS_ROOT = Path(__file__).resolve().parent.parent / "builtin_skills"
 # --------------------------------------------------------------------------- #
 # Default tool configuration
 # --------------------------------------------------------------------------- #
-
-_TOOL_DEFAULTS = {
-    "IMAGE_ANALYSIS_PROVIDER": "ollama",
-    "IMAGE_ANALYSIS_MODEL": "glm-ocr",
-    "IMAGE_GENERATION_PROVIDER": "ollama",
-    "IMAGE_GENERATION_MODEL": "x/z-image-turbo",
-}
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -94,7 +88,7 @@ class RuntimeHost:
 
     On startup, the host:
     1. Bootstraps built-in skills into the workspace
-    2. Configures tool environment variables (image models, SearXNG, etc.)
+    2. Prepares runtime-managed tool environment (SearXNG, local services, etc.)
     3. Builds the system prompt from the workspace content
 
     Args:
@@ -102,12 +96,8 @@ class RuntimeHost:
         session_id: Session identifier used to resume/persist project state.
         provider: LLM provider name ("ollama", "deepseek", "lmstudio", "zai", etc.).
         mode: Execution mode ("auto" or "controlled").
-        sandbox_backend: Internal/testing override for the exec backend.
+        sandbox_backend: Internal/testing hook. Only ``docker`` is supported.
         model: Model name override (uses provider defaults if not specified).
-        image_analysis_provider: Override for IMAGE_ANALYSIS_PROVIDER.
-        image_analysis_model: Override for IMAGE_ANALYSIS_MODEL.
-        image_generation_provider: Override for IMAGE_GENERATION_PROVIDER.
-        image_generation_model: Override for IMAGE_GENERATION_MODEL.
     """
 
     HELP_TEXT = "\n".join([
@@ -130,10 +120,6 @@ class RuntimeHost:
         mode: str = "controlled",
         sandbox_backend: str = "docker",
         model: Optional[str] = None,
-        image_analysis_provider: Optional[str] = None,
-        image_analysis_model: Optional[str] = None,
-        image_generation_provider: Optional[str] = None,
-        image_generation_model: Optional[str] = None,
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -153,20 +139,13 @@ class RuntimeHost:
         self.requested_sandbox_backend = str(sandbox_backend).strip().lower() or "docker"
         self.resolved_sandbox_backend = "docker"
         self._sandbox_status_fields: dict[str, str] = {}
+        self._local_model_service: LocalModelServiceManager | None = None
         self._prompt_session = self._build_prompt_session()
 
         # 1. Bootstrap built-in skills into workspace
         self._bootstrap_skills()
 
-        # 2. Configure tool environment variables
-        self._configure_tool_environment(
-            image_analysis_provider=image_analysis_provider,
-            image_analysis_model=image_analysis_model,
-            image_generation_provider=image_generation_provider,
-            image_generation_model=image_generation_model,
-        )
-
-        # 3. Build components
+        # 2. Build components
         self._model = create_provider(provider, model=model)
 
         self._stream_display = StreamingDisplay()
@@ -197,7 +176,7 @@ class RuntimeHost:
         self._env.approval_profile = getattr(
             sandbox_executor,
             "approval_profile",
-            "host-subprocess-v1",
+            "docker-online-rw-workspace-v1",
         )
         raw_session = None
         if self._env.load_session(self.session_path):
@@ -265,6 +244,8 @@ class RuntimeHost:
             for skill_dir in sorted(p for p in scope_dir.iterdir() if p.is_dir()):
                 if skill_dir.name.startswith((".", "_")):
                     continue
+                if not (skill_dir / "SKILL.md").exists():
+                    continue
                 target_skill = target_scope / skill_dir.name
                 # Replace entire skill directory to pick up updates
                 if target_skill.exists():
@@ -273,37 +254,6 @@ class RuntimeHost:
                     else:
                         target_skill.unlink()
                 shutil.copytree(skill_dir, target_skill)
-
-    # ----- Tool environment ------------------------------------------------- #
-
-    def _configure_tool_environment(
-        self,
-        *,
-        image_analysis_provider: Optional[str] = None,
-        image_analysis_model: Optional[str] = None,
-        image_generation_provider: Optional[str] = None,
-        image_generation_model: Optional[str] = None,
-    ) -> None:
-        """Set environment variables for skill scripts to read.
-
-        Priority: CLI flag > existing env var > built-in default.
-        Uses ``os.environ.setdefault()`` so existing env vars are preserved,
-        then applies explicit CLI overrides on top.
-        """
-        # Apply defaults (only if not already set in environment)
-        for key, default in _TOOL_DEFAULTS.items():
-            os.environ.setdefault(key, default)
-
-        # Apply explicit CLI overrides (these win over everything)
-        overrides = {
-            "IMAGE_ANALYSIS_PROVIDER": image_analysis_provider,
-            "IMAGE_ANALYSIS_MODEL": image_analysis_model,
-            "IMAGE_GENERATION_PROVIDER": image_generation_provider,
-            "IMAGE_GENERATION_MODEL": image_generation_model,
-        }
-        for key, value in overrides.items():
-            if value is not None and value.strip():
-                os.environ[key] = value.strip()
 
     # ----- Agent & streaming ------------------------------------------------ #
 
@@ -419,10 +369,6 @@ class RuntimeHost:
             f"project_root={self.project_root}",
             f"docs_root={self.docs_root}",
             f"state_root={self.state_root}",
-            f"image_analysis={os.environ.get('IMAGE_ANALYSIS_PROVIDER', 'none')}"
-            f"/{os.environ.get('IMAGE_ANALYSIS_MODEL', 'none')}",
-            f"image_generation={os.environ.get('IMAGE_GENERATION_PROVIDER', 'none')}"
-            f"/{os.environ.get('IMAGE_GENERATION_MODEL', 'none')}",
             f"searxng={os.environ.get('SEARXNG_BASE_URL', 'not set')}",
             f"full_history_turns={len(self._env.full_history)}",
             f"observation_turns={len(self._env.observation)}",
@@ -440,39 +386,41 @@ class RuntimeHost:
         sandbox_backend: str,
     ) -> object:
         """Resolve the configured sandbox backend into a callable executor."""
-        backend = str(sandbox_backend).strip().lower() or "auto"
-        if backend == "host":
-            self.resolved_sandbox_backend = "host"
-            self._sandbox_status_fields = {
-                "sandbox_profile": "host-subprocess-v1",
-            }
-            return host_sandbox_executor
+        backend = str(sandbox_backend).strip().lower() or "docker"
+        if backend != "docker":
+            raise ValueError(f"Unsupported sandbox_backend: {sandbox_backend}")
 
-        if backend in {"auto", "docker"}:
-            available, reason = docker_is_available()
-            if available:
-                executor = DockerSandboxExecutor(
-                    self.workspace,
-                    session_id=self.session_id,
-                )
-                prepare_runtime = getattr(executor, "prepare_runtime", None)
-                if callable(prepare_runtime):
-                    prepare_runtime()
-                self.resolved_sandbox_backend = "docker" if backend == "docker" else "docker(auto)"
-                self._sandbox_status_fields = executor.status_fields()
-                for key, value in executor.tool_environment().items():
-                    os.environ[key] = value
-                return executor
-            if backend == "docker":
-                raise ValueError(f"Docker sandbox requested but unavailable: {reason}")
-            self.resolved_sandbox_backend = "host(auto-fallback)"
-            self._sandbox_status_fields = {
-                "sandbox_profile": "host-subprocess-v1",
-                "sandbox_fallback_reason": reason,
-            }
-            return host_sandbox_executor
+        available, reason = docker_is_available()
+        if not available:
+            raise ValueError(f"Docker sandbox unavailable: {reason}")
 
-        raise ValueError(f"Unsupported sandbox_backend: {sandbox_backend}")
+        executor = DockerSandboxExecutor(
+            self.workspace,
+            session_id=self.session_id,
+        )
+        if local_model_service_supported() and hasattr(executor, "attach_local_model_service"):
+            service = LocalModelServiceManager(
+                self.workspace,
+                session_id=self.session_id,
+            )
+            service.start()
+            executor.attach_local_model_service(service.tool_environment())
+            self._local_model_service = service
+        prepare_runtime = getattr(executor, "prepare_runtime", None)
+        try:
+            if callable(prepare_runtime):
+                prepare_runtime()
+        except Exception:
+            if self._local_model_service is not None:
+                with contextlib.suppress(Exception):
+                    self._local_model_service.stop()
+                self._local_model_service = None
+            raise
+        self.resolved_sandbox_backend = "docker"
+        self._sandbox_status_fields = executor.status_fields()
+        for key, value in executor.tool_environment().items():
+            os.environ[key] = value
+        return executor
 
     def _shutdown(self) -> None:
         """Persist state before exit."""
@@ -486,6 +434,12 @@ class RuntimeHost:
                 sandbox_shutdown()
             except Exception:
                 pass
+        if self._local_model_service is not None:
+            try:
+                self._local_model_service.stop()
+            except Exception:
+                pass
+            self._local_model_service = None
 
     def _open_session_field_view(self, field: str) -> str:
         """Persist and open a field-specific HTML view for the current session."""
