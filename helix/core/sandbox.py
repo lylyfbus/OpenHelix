@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+from helix.core.local_model_service import (
+    has_active_runtimes,
+    register_active_runtime,
+    service_runtime_dir,
+    unregister_active_runtime,
+)
 from helix.core.state import Turn
 
 
@@ -32,7 +38,9 @@ _DOCKER_CPUS = os.environ.get("AGENTIC_DOCKER_SANDBOX_CPUS", "2.0")
 _DOCKER_PIDS = os.environ.get("AGENTIC_DOCKER_SANDBOX_PIDS", "256")
 _SEARXNG_READY_TIMEOUT = int(os.environ.get("AGENTIC_DOCKER_SEARXNG_READY_TIMEOUT", "30"))
 _SEARXNG_READY_POLL = float(os.environ.get("AGENTIC_DOCKER_SEARXNG_READY_POLL", "1.0"))
-_NETWORK_NAME_PREFIX = "helix-sandbox-net-"
+_GLOBAL_NETWORK_NAME = "helix-sandbox-net"
+_GLOBAL_SEARXNG_NAME = "helix-searxng"
+_NETWORK_NAME_PREFIX = "helix-sandbox-net"
 _PASS_ENV_PREFIXES = (
     "HELIX_LOCAL_MODEL_SERVICE_",
     "SEARXNG_",
@@ -283,15 +291,13 @@ class DockerSandboxExecutor:
         self.workspace = Path(workspace).expanduser().resolve()
         self.slug = _workspace_slug(self.workspace)
         self.session_id = str(session_id or "session").strip() or "session"
-        self.session_token = hashlib.sha256(self.session_id.encode("utf-8")).hexdigest()[:12]
         self.image_tag = f"helix-sandbox:{_hash_directory(_DOCKER_BUILD_ROOT)}"
-        self.network_name = f"helix-sandbox-net-{self.slug}"
+        self.network_name = _GLOBAL_NETWORK_NAME
         self.cache_dir = self.workspace / ".runtime" / "docker" / "cache"
-        self.searxng_name = f"helix-searxng-{self.slug}"
-        self.searxng_config_dir = self.workspace / ".runtime" / "docker" / "searxng" / "config"
-        self.searxng_data_dir = self.workspace / ".runtime" / "docker" / "searxng" / "data"
-        self.session_dir = self.workspace / ".runtime" / "docker" / "active_sessions"
-        self.session_marker_path = self.session_dir / f"{self.session_token}.{os.getpid()}.json"
+        self.searxng_name = _GLOBAL_SEARXNG_NAME
+        self.searxng_runtime_dir = service_runtime_dir("searxng")
+        self.searxng_config_dir = self.searxng_runtime_dir / "config"
+        self.searxng_data_dir = self.searxng_runtime_dir / "data"
         requested = str(searxng_base_url or "").strip()
         self._managed_searxng = not requested
         self._effective_searxng_base_url = (
@@ -303,6 +309,7 @@ class DockerSandboxExecutor:
         self._session_registered = False
         self._runtime_prepared = False
         self._local_model_service_env: dict[str, str] = {}
+        self._runtime_marker_path: Path | None = None
 
     def status_fields(self) -> dict[str, str]:
         fields = {
@@ -350,52 +357,22 @@ class DockerSandboxExecutor:
             raise RuntimeError(detail or f"docker {' '.join(args)} failed")
         return completed
 
-    def _prune_stale_session_markers(self) -> None:
-        if not self.session_dir.exists():
-            return
-        for marker in self.session_dir.glob("*.json"):
-            try:
-                payload = json.loads(marker.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                marker.unlink(missing_ok=True)
-                continue
-
-            try:
-                pid = int(payload.get("pid"))
-            except (TypeError, ValueError):
-                marker.unlink(missing_ok=True)
-                continue
-
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                marker.unlink(missing_ok=True)
-            except PermissionError:
-                continue
-
     def _register_active_session(self) -> None:
         if self._session_registered:
             return
-        self.session_dir.mkdir(parents=True, exist_ok=True)
-        self._prune_stale_session_markers()
-        payload = {
-            "pid": os.getpid(),
-            "session_id": self.session_id,
-            "workspace": str(self.workspace),
-            "started_at": time.time(),
-        }
-        self.session_marker_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._runtime_marker_path = register_active_runtime(
+            workspace=self.workspace,
+            session_id=self.session_id,
+        )
         self._session_registered = True
 
     def _unregister_active_session(self) -> None:
-        self.session_marker_path.unlink(missing_ok=True)
+        unregister_active_runtime(self._runtime_marker_path)
+        self._runtime_marker_path = None
         self._session_registered = False
 
     def _has_active_sessions(self) -> bool:
-        self._prune_stale_session_markers()
-        if not self.session_dir.exists():
-            return False
-        return any(self.session_dir.glob("*.json"))
+        return has_active_runtimes()
 
     def _ensure_image(self) -> None:
         inspect = self._run_docker(["image", "inspect", self.image_tag], check=False)
@@ -566,13 +543,9 @@ class DockerSandboxExecutor:
         self._runtime_prepared = False
         if self._has_active_sessions():
             return
-        try:
-            if self._managed_searxng:
-                self._run_docker(["rm", "-f", self.searxng_name], check=False, timeout=30)
-            self._run_docker(["network", "rm", self.network_name], check=False, timeout=30)
-        finally:
-            if self.session_dir.exists() and not any(self.session_dir.iterdir()):
-                self.session_dir.rmdir()
+        if self._managed_searxng:
+            self._run_docker(["rm", "-f", self.searxng_name], check=False, timeout=30)
+        self._run_docker(["network", "rm", self.network_name], check=False, timeout=30)
 
     def _build_container_environment(self, workspace_root: Path) -> dict[str, str]:
         tmpdir = workspace_root / ".runtime" / "tmp"

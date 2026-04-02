@@ -138,6 +138,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "prompt": prompt,
         "size": str(args.size or "1024x1024"),
         "output_path": output_path,
+        "workspace_root": str(Path.cwd().resolve()),
     }
     timeout = max(5, int(args.timeout))
     try:

@@ -29,7 +29,7 @@ The illustration above captures the design used throughout the repo:
 - `Environment` is everything the agent can inspect or affect through its `bash` and `python` hands: local files, OS resources, databases, APIs, and other external systems.
 - `Runtime Evidence` flows back into state through stdout/stderr observations.
 - `User` sits outside the loop.
-- `Sub-agent Loop` mirrors the same pattern in an isolated delegated workspace.
+- `Sub-agent Loop` mirrors the same pattern for delegated subtasks over the same runtime and workspace contract.
 
 ## Install
 
@@ -53,7 +53,7 @@ You need four things:
 1. a workspace directory
 2. a session id
 3. an LLM provider
-4. Docker available if you want the managed sandbox and tool services
+4. Docker running, because Helix uses the Docker sandbox and managed tool services by default
 
 ### Full-Featured Example
 
@@ -175,12 +175,15 @@ Precedence is:
 | `SEARXNG_BASE_URL` | search-online-context skill | injected automatically by the Docker runtime for sandboxed search execs |
 | `HELIX_LOCAL_MODEL_SERVICE_URL` | local PyTorch image skills | injected automatically by the Docker runtime on macOS Apple Silicon |
 | `HELIX_LOCAL_MODEL_SERVICE_TOKEN` | local PyTorch image skills | injected automatically by the Docker runtime on macOS Apple Silicon |
+| `HF_TOKEN` | Hugging Face-backed local PyTorch image skills | recommended before starting Helix so local model downloads/auth work reliably |
+| `HELIX_HOME` | shared Helix service state | override the default global Helix home at `~/.helix` |
 
 ### Runtime Controls
 
 | Variable | Used by | Default / Notes |
 |---|---|---|
-| `AGENTIC_SANDBOX_TIMEOUT` | sandbox executor | `600` seconds |
+| `AGENTIC_DOCKER_SANDBOX_TIMEOUT` | Docker sandbox executor | `600` seconds |
+| `AGENTIC_DOCKER_BUILD_TIMEOUT` | Docker image build / pull steps | `1800` seconds |
 
 ### Example: Z.AI General API vs Coding API
 
@@ -218,7 +221,7 @@ https://api.z.ai/api/coding/paas/v4/chat/completions
 
 The inspection commands operate on the active named session.
 
-## Optional Tool Backends
+## Built-In Tool Services
 
 ### Image Skills
 
@@ -229,9 +232,17 @@ The built-in image capabilities are skill-owned rather than CLI-configured:
 
 On macOS Apple Silicon, the Docker runtime starts a narrow host-native local model service and injects the service URL/token into Docker execs automatically. The core Helix CLI does not expose separate image provider/model flags.
 
+The local model service is shared across all Helix runtimes on the machine:
+
+- the first active Helix runtime starts it
+- later Helix runtimes reuse it
+- it is stopped when the last Helix runtime exits
+
+If you use the Hugging Face-backed local image skills, export `HF_TOKEN` before launching Helix and restart Helix after changing that token.
+
 ### Web Search: SearXNG
 
-The app manages SearXNG for you through Docker when the Docker sandbox is active.
+The app manages SearXNG for you through Docker.
 
 For normal app usage you do not need to:
 
@@ -239,9 +250,32 @@ For normal app usage you do not need to:
 - start a separate local SearXNG container
 - wire search execs to a host port
 
-At startup the runtime prepares the Docker sandbox image, Docker network, cache volume, and the managed SearXNG sidecar. Search execs then receive the correct internal `SEARXNG_BASE_URL` automatically.
+SearXNG is also shared across all Helix runtimes:
+
+- the first active Helix runtime starts the managed SearXNG container
+- later Helix runtimes reuse it
+- it is stopped when the last Helix runtime exits
+
+At startup the runtime prepares the Docker sandbox image, shared Docker network, workspace-local exec cache, and the managed SearXNG sidecar. Search execs then receive the correct internal `SEARXNG_BASE_URL` automatically.
 
 Manual `SEARXNG_BASE_URL` setup only matters if you run the search scripts outside the Helix runtime.
+
+## Runtime Storage
+
+Workspace-local runtime state:
+
+- `WORKSPACE/sessions/<session_id>/...` for session history and state
+- `WORKSPACE/.runtime/docker/cache` for persistent sandbox package/tool cache
+- `WORKSPACE/.runtime/tmp` and `WORKSPACE/.runtime/logs` for per-workspace temp files and exec logs
+
+Global shared Helix service state:
+
+- `~/.helix/runtime/services/searxng`
+- `~/.helix/runtime/services/local-model-service`
+- `~/.helix/cache/local-model-service`
+- `~/.helix/runtime/active-runtimes`
+
+Set `HELIX_HOME` if you want those shared global paths rooted somewhere else.
 
 ## Troubleshooting
 

@@ -1,5 +1,6 @@
 """Docker sandbox integration tests."""
 
+import os
 import shutil
 import sys
 import tempfile
@@ -19,12 +20,47 @@ def _docker_ready() -> bool:
     return True
 
 
+def _set_helix_home(workspace: Path) -> tuple[str | None, Path]:
+    previous = os.environ.get("HELIX_HOME")
+    home = workspace / ".test-helix-home"
+    os.environ["HELIX_HOME"] = str(home)
+    return previous, home
+
+
+def _restore_helix_home(previous: str | None) -> None:
+    if previous is None:
+        os.environ.pop("HELIX_HOME", None)
+    else:
+        os.environ["HELIX_HOME"] = previous
+
+
+def test_docker_sandbox_uses_global_service_paths():
+    with tempfile.TemporaryDirectory() as td:
+        workspace_one = (Path(td) / "workspace-one").resolve()
+        workspace_two = (Path(td) / "workspace-two").resolve()
+        workspace_one.mkdir(parents=True, exist_ok=True)
+        workspace_two.mkdir(parents=True, exist_ok=True)
+        previous, helix_home = _set_helix_home(workspace_one)
+        try:
+            executor_one = DockerSandboxExecutor(workspace_one, searxng_base_url="https://example.com")
+            executor_two = DockerSandboxExecutor(workspace_two, searxng_base_url="https://example.com")
+            assert executor_one.network_name == executor_two.network_name == "helix-sandbox-net"
+            assert executor_one.cache_dir == workspace_one / ".runtime" / "docker" / "cache"
+            assert executor_two.cache_dir == workspace_two / ".runtime" / "docker" / "cache"
+            assert executor_one.searxng_config_dir == helix_home / "runtime" / "services" / "searxng" / "config"
+            assert executor_two.searxng_data_dir == helix_home / "runtime" / "services" / "searxng" / "data"
+            print("  Docker sandbox global service paths OK")
+        finally:
+            _restore_helix_home(previous)
+
+
 def test_docker_sandbox_bash_execution():
     if not _docker_ready():
         return
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
+        previous, _ = _set_helix_home(workspace)
         executor = DockerSandboxExecutor(workspace, searxng_base_url="https://example.com")
         try:
             turn = executor(
@@ -40,6 +76,7 @@ def test_docker_sandbox_bash_execution():
             print("  Docker sandbox bash execution OK")
         finally:
             executor.shutdown()
+            _restore_helix_home(previous)
 
 
 def test_docker_sandbox_writes_host_workspace():
@@ -48,6 +85,7 @@ def test_docker_sandbox_writes_host_workspace():
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
+        previous, _ = _set_helix_home(workspace)
         executor = DockerSandboxExecutor(workspace, searxng_base_url="https://example.com")
         try:
             turn = executor(
@@ -63,6 +101,7 @@ def test_docker_sandbox_writes_host_workspace():
             print("  Docker sandbox host workspace write OK")
         finally:
             executor.shutdown()
+            _restore_helix_home(previous)
 
 
 def test_docker_sandbox_persists_python_installs_in_cache():
@@ -71,6 +110,7 @@ def test_docker_sandbox_persists_python_installs_in_cache():
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
+        previous, _ = _set_helix_home(workspace)
         package_dir = workspace / "pkgdemo"
         module_dir = package_dir / "demo_pkg"
         module_dir.mkdir(parents=True, exist_ok=True)
@@ -107,6 +147,7 @@ def test_docker_sandbox_persists_python_installs_in_cache():
             print("  Docker sandbox Python package cache persistence OK")
         finally:
             executor.shutdown()
+            _restore_helix_home(previous)
 
 
 def test_docker_sandbox_browser_tooling_available():
@@ -115,6 +156,7 @@ def test_docker_sandbox_browser_tooling_available():
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
+        previous, _ = _set_helix_home(workspace)
         executor = DockerSandboxExecutor(workspace, searxng_base_url="https://example.com")
         try:
             turn = executor(
@@ -137,6 +179,7 @@ def test_docker_sandbox_browser_tooling_available():
             print("  Docker sandbox browser tooling OK")
         finally:
             executor.shutdown()
+            _restore_helix_home(previous)
 
 
 def test_docker_sandbox_can_use_git_metadata():
@@ -145,6 +188,7 @@ def test_docker_sandbox_can_use_git_metadata():
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
+        previous, _ = _set_helix_home(workspace)
         import subprocess
 
         subprocess.run(["git", "init"], cwd=workspace, check=True, stdout=subprocess.DEVNULL)
@@ -168,6 +212,7 @@ def test_docker_sandbox_can_use_git_metadata():
             print("  Docker sandbox git metadata access OK")
         finally:
             executor.shutdown()
+            _restore_helix_home(previous)
 
 
 def test_docker_sandbox_managed_searxng_returns_json():
@@ -176,6 +221,7 @@ def test_docker_sandbox_managed_searxng_returns_json():
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
+        previous, _ = _set_helix_home(workspace)
         executor = DockerSandboxExecutor(workspace)
         try:
             turn = executor(
@@ -198,6 +244,7 @@ def test_docker_sandbox_managed_searxng_returns_json():
             print("  Docker sandbox managed SearXNG JSON OK")
         finally:
             executor.shutdown()
+            _restore_helix_home(previous)
 
 
 def test_docker_sandbox_image_skill_can_reach_local_model_service():
@@ -206,6 +253,7 @@ def test_docker_sandbox_image_skill_can_reach_local_model_service():
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
+        previous, _ = _set_helix_home(workspace)
         skills_root = workspace / "skills" / "all-agents"
         skills_root.mkdir(parents=True, exist_ok=True)
         source_skill = (
@@ -219,7 +267,6 @@ def test_docker_sandbox_image_skill_can_reach_local_model_service():
         manager = LocalModelServiceManager(
             workspace,
             session_id="docker-image-skill",
-            cache_root=workspace / ".runtime" / "test-local-model-cache",
             backend_mode="fake",
         )
         try:
@@ -249,6 +296,7 @@ def test_docker_sandbox_image_skill_can_reach_local_model_service():
         finally:
             executor.shutdown()
             manager.stop()
+            _restore_helix_home(previous)
 
 
 if __name__ == "__main__":

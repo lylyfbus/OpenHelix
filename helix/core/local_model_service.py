@@ -42,6 +42,7 @@ _DEFAULT_BACKEND_MODE = os.environ.get(
 _FAKE_PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9pob7XUAAAAASUVORK5CYII="
 )
+_LOCAL_MODEL_SERVICE_NAME = "local-model-service"
 _DEFAULT_ANALYSIS_MODEL_ID = "zai-org/GLM-OCR"
 _DEFAULT_GENERATION_MODEL_ID = "Tongyi-MAI/Z-Image-Turbo"
 _GENERATION_DEPENDENCIES = (
@@ -66,9 +67,91 @@ def local_model_service_supported() -> bool:
     return sys.platform == "darwin" and platform.machine().lower() == "arm64"
 
 
-def default_cache_root(workspace: Path) -> Path:
-    workspace_root = Path(workspace).expanduser().resolve()
-    return (workspace_root / ".runtime" / "local-model-service" / "cache").resolve()
+def helix_home() -> Path:
+    override = str(os.environ.get("HELIX_HOME", "")).strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".helix").resolve()
+
+
+def runtime_root() -> Path:
+    return helix_home() / "runtime"
+
+
+def service_runtime_dir(service_name: str) -> Path:
+    return runtime_root() / "services" / service_name
+
+
+def service_cache_dir(service_name: str) -> Path:
+    return helix_home() / "cache" / service_name
+
+
+def active_runtime_dir() -> Path:
+    return runtime_root() / "active-runtimes"
+
+
+def _runtime_marker_path(pid: int | None = None) -> Path:
+    token = int(pid or os.getpid())
+    return active_runtime_dir() / f"{token}.json"
+
+
+def prune_stale_runtime_markers() -> None:
+    markers = active_runtime_dir()
+    if not markers.exists():
+        return
+    for marker in markers.glob("*.json"):
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            marker.unlink(missing_ok=True)
+            continue
+        try:
+            pid = int(payload.get("pid"))
+        except (TypeError, ValueError):
+            marker.unlink(missing_ok=True)
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            marker.unlink(missing_ok=True)
+        except PermissionError:
+            continue
+
+
+def register_active_runtime(*, workspace: Path, session_id: str) -> Path:
+    markers = active_runtime_dir()
+    markers.mkdir(parents=True, exist_ok=True)
+    prune_stale_runtime_markers()
+    marker = _runtime_marker_path()
+    payload = {
+        "pid": os.getpid(),
+        "workspace": str(Path(workspace).expanduser().resolve()),
+        "session_id": str(session_id or "session").strip() or "session",
+        "started_at": time.time(),
+    }
+    marker.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return marker
+
+
+def unregister_active_runtime(marker_path: Path | None) -> None:
+    if marker_path is not None:
+        marker_path.unlink(missing_ok=True)
+
+
+def has_active_runtimes() -> bool:
+    prune_stale_runtime_markers()
+    markers = active_runtime_dir()
+    if not markers.exists():
+        return False
+    return any(markers.glob("*.json"))
+
+
+def default_cache_root(workspace: Path | None = None) -> Path:
+    return service_cache_dir(_LOCAL_MODEL_SERVICE_NAME).resolve()
+
+
+def default_runtime_root() -> Path:
+    return service_runtime_dir(_LOCAL_MODEL_SERVICE_NAME).resolve()
 
 
 def _json_dumps(payload: dict[str, Any]) -> bytes:
@@ -165,6 +248,19 @@ def _resolve_workspace_path(
     return resolved
 
 
+def _resolve_service_workspace_root(payload: dict[str, Any]) -> Path:
+    raw = str(payload.get("workspace_root", "")).strip()
+    if not raw:
+        raise ValueError("workspace_root is required")
+    root = Path(raw).expanduser()
+    if not root.is_absolute():
+        raise ValueError("workspace_root must be absolute")
+    resolved = root.resolve(strict=False)
+    if not resolved.exists() or not resolved.is_dir():
+        raise ValueError("workspace_root must exist and be a directory")
+    return resolved
+
+
 def _parse_size(size_text: str) -> tuple[int, int]:
     token = str(size_text or "").strip().lower()
     if "x" not in token:
@@ -225,8 +321,7 @@ class _WorkerBackend(Protocol):
 
 
 class _FakeImageGenerationBackend:
-    def __init__(self, workspace_root: Path, model_id: str) -> None:
-        self.workspace_root = workspace_root
+    def __init__(self, model_id: str) -> None:
         self.model_id = model_id
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -239,13 +334,14 @@ class _FakeImageGenerationBackend:
                 "error_code": "image_prompt_missing",
                 "message": "prompt is required",
             }
+        workspace_root = _resolve_service_workspace_root(payload)
         resolved = _resolve_workspace_path(
-            self.workspace_root,
+            workspace_root,
             str(payload.get("output_path", "")).strip(),
             expect_exists=False,
         )
         resolved.write_bytes(_FAKE_PNG_BYTES)
-        output_path = str(resolved.relative_to(self.workspace_root))
+        output_path = str(resolved.relative_to(workspace_root))
         return {
             "status": "ok",
             "output_path": output_path,
@@ -256,8 +352,7 @@ class _FakeImageGenerationBackend:
 
 
 class _FakeImageAnalysisBackend:
-    def __init__(self, workspace_root: Path, model_id: str) -> None:
-        self.workspace_root = workspace_root
+    def __init__(self, model_id: str) -> None:
         self.model_id = model_id
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -270,12 +365,13 @@ class _FakeImageAnalysisBackend:
                 "error_code": "image_query_missing",
                 "message": "query is required",
             }
+        workspace_root = _resolve_service_workspace_root(payload)
         resolved = _resolve_workspace_path(
-            self.workspace_root,
+            workspace_root,
             str(payload.get("image_path", "")).strip(),
             expect_exists=True,
         )
-        image_path = str(resolved.relative_to(self.workspace_root))
+        image_path = str(resolved.relative_to(workspace_root))
         return {
             "status": "ok",
             "analysis": f"fake-analysis: {query} ({image_path})",
@@ -286,8 +382,7 @@ class _FakeImageAnalysisBackend:
 
 
 class _RealImageAnalysisBackend:
-    def __init__(self, workspace_root: Path, model_id: str, cache_root: Path, python_bin: Path) -> None:
-        self.workspace_root = workspace_root
+    def __init__(self, model_id: str, cache_root: Path, python_bin: Path) -> None:
         self.model_id = model_id
         self.cache_root = cache_root
         self.python_bin = python_bin
@@ -324,8 +419,9 @@ class _RealImageAnalysisBackend:
         self.model.to(device)
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        workspace_root = _resolve_service_workspace_root(payload)
         resolved = _resolve_workspace_path(
-            self.workspace_root,
+            workspace_root,
             str(payload.get("image_path", "")).strip(),
             expect_exists=True,
         )
@@ -383,8 +479,7 @@ class _RealImageAnalysisBackend:
 
 
 class _RealImageGenerationBackend:
-    def __init__(self, workspace_root: Path, model_id: str, cache_root: Path, python_bin: Path) -> None:
-        self.workspace_root = workspace_root
+    def __init__(self, model_id: str, cache_root: Path, python_bin: Path) -> None:
         self.model_id = model_id
         self.cache_root = cache_root
         self.python_bin = python_bin
@@ -425,9 +520,10 @@ class _RealImageGenerationBackend:
                 "message": "prompt is required",
             }
         try:
+            workspace_root = _resolve_service_workspace_root(payload)
             width, height = _parse_size(str(payload.get("size", "")).strip())
             output_path = _resolve_workspace_path(
-                self.workspace_root,
+                workspace_root,
                 str(payload.get("output_path", "")).strip(),
                 expect_exists=False,
             )
@@ -439,7 +535,7 @@ class _RealImageGenerationBackend:
             )
             image = result.images[0]
             image.save(output_path)
-            rel = str(output_path.relative_to(self.workspace_root))
+            rel = str(output_path.relative_to(workspace_root))
             return {
                 "status": "ok",
                 "output_path": rel,
@@ -460,7 +556,6 @@ class _RealImageGenerationBackend:
 def _build_backend(
     *,
     kind: str,
-    workspace_root: Path,
     cache_root: Path,
     model_id: str,
     backend_mode: str,
@@ -468,25 +563,23 @@ def _build_backend(
 ) -> _WorkerBackend:
     if backend_mode == _FAKE_BACKEND_NAME:
         if kind == "generate":
-            return _FakeImageGenerationBackend(workspace_root, model_id)
-        return _FakeImageAnalysisBackend(workspace_root, model_id)
+            return _FakeImageGenerationBackend(model_id)
+        return _FakeImageAnalysisBackend(model_id)
     if kind == "generate":
-        return _RealImageGenerationBackend(workspace_root, model_id, cache_root, python_bin)
-    return _RealImageAnalysisBackend(workspace_root, model_id, cache_root, python_bin)
+        return _RealImageGenerationBackend(model_id, cache_root, python_bin)
+    return _RealImageAnalysisBackend(model_id, cache_root, python_bin)
 
 
 class _CoordinatorController:
     def __init__(
         self,
         *,
-        workspace_root: Path,
         cache_root: Path,
         token: str,
         idle_seconds: int,
         backend_mode: str,
         runtime_dir: Path,
     ) -> None:
-        self.workspace_root = workspace_root
         self.cache_root = cache_root
         self.token = token
         self.idle_seconds = max(1, int(idle_seconds))
@@ -581,8 +674,6 @@ class _CoordinatorController:
             kind,
             "--model-id",
             model_id,
-            "--workspace",
-            str(self.workspace_root),
             "--cache-root",
             str(self.cache_root),
             "--backend-mode",
@@ -756,7 +847,7 @@ class _CoordinatorHandler(BaseHTTPRequestHandler):
 
 
 class LocalModelServiceManager:
-    """Own the session-scoped local coordinator process."""
+    """Own the shared local coordinator process."""
 
     def __init__(
         self,
@@ -769,41 +860,44 @@ class LocalModelServiceManager:
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.session_id = str(session_id or "session").strip() or "session"
-        self.session_token = secrets.token_hex(8)
-        self.runtime_dir = self.workspace / ".runtime" / "local-model-service"
+        self.runtime_dir = default_runtime_root()
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        self.state_path = self.runtime_dir / f"{self.session_id}.json"
-        self.log_path = self.runtime_dir / f"{self.session_id}.log"
+        self.state_path = self.runtime_dir / "service.json"
+        self.log_path = self.runtime_dir / "service.log"
         self.cache_root = Path(cache_root or default_cache_root(self.workspace)).expanduser().resolve()
         self.idle_seconds = max(1, int(idle_seconds))
         self.backend_mode = str(backend_mode or _DEFAULT_BACKEND_MODE).strip().lower() or _REAL_BACKEND_NAME
         self._process: subprocess.Popen[str] | None = None
         self._port: int | None = None
         self._token: str | None = None
+        self._runtime_marker_path: Path | None = None
 
     def start(self) -> None:
-        self._cleanup_stale()
+        if self._runtime_marker_path is None:
+            self._runtime_marker_path = register_active_runtime(
+                workspace=self.workspace,
+                session_id=self.session_id,
+            )
         if self._process is not None and self._process.poll() is None and self._port and self._token:
+            return
+        if self._adopt_existing_service():
             return
         self.cache_root.mkdir(parents=True, exist_ok=True)
         port = _find_free_port()
-        token = secrets.token_urlsafe(24)
+        token = f"tok_{secrets.token_urlsafe(24)}"
         with self.log_path.open("a", encoding="utf-8") as log_handle:
             cmd = [
                 sys.executable,
                 "-m",
                 "helix.core.local_model_service",
                 "coordinator",
-                "--workspace",
-                str(self.workspace),
                 "--cache-root",
                 str(self.cache_root),
                 "--host",
                 "127.0.0.1",
                 "--port",
                 str(port),
-                "--token",
-                token,
+                f"--token={token}",
                 "--idle-seconds",
                 str(self.idle_seconds),
                 "--backend-mode",
@@ -828,12 +922,13 @@ class LocalModelServiceManager:
             self._process = None
             self._port = None
             self._token = None
+            unregister_active_runtime(self._runtime_marker_path)
+            self._runtime_marker_path = None
             raise
         self.state_path.write_text(
             json.dumps(
                 {
                     "pid": int(process.pid or 0),
-                    "session_id": self.session_id,
                     "port": port,
                     "token": token,
                     "started_at": time.time(),
@@ -845,6 +940,13 @@ class LocalModelServiceManager:
         )
 
     def stop(self) -> None:
+        unregister_active_runtime(self._runtime_marker_path)
+        self._runtime_marker_path = None
+        if has_active_runtimes():
+            self._process = None
+            self._port = None
+            self._token = None
+            return
         pid = 0
         if self._process is not None:
             pid = int(self._process.pid or 0)
@@ -880,32 +982,48 @@ class LocalModelServiceManager:
             "local_model_service_backend": self.backend_mode,
         }
 
-    def _cleanup_stale(self) -> None:
+    def _adopt_existing_service(self) -> bool:
         if not self.state_path.exists():
-            return
+            return False
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             self.state_path.unlink(missing_ok=True)
-            return
-        pid = int(payload.get("pid") or 0)
-        port = int(payload.get("port") or 0)
+            return False
+        try:
+            pid = int(payload.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        try:
+            port = int(payload.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
         token = str(payload.get("token") or "").strip()
+        backend_mode = str(payload.get("backend_mode") or "").strip().lower()
         if pid <= 0 or port <= 0 or not token:
             self.state_path.unlink(missing_ok=True)
-            return
+            return False
+        if backend_mode and backend_mode != self.backend_mode:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, 0)
+                _kill_process_tree(pid)
+            self.state_path.unlink(missing_ok=True)
+            return False
         status, _, parsed = _http_json_request(
             method="GET",
             url=f"http://127.0.0.1:{port}{_COORDINATOR_HEALTH_PATH}",
             timeout=2,
         )
         if status == 200 and isinstance(parsed, dict) and parsed.get("status") == "ok":
+            self._process = None
+            self._port = port
+            self._token = token
+            return True
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, 0)
             _kill_process_tree(pid)
-        else:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, 0)
-                _kill_process_tree(pid)
         self.state_path.unlink(missing_ok=True)
+        return False
 
     def _wait_for_health(self) -> None:
         assert self._port is not None
@@ -924,11 +1042,9 @@ class LocalModelServiceManager:
 
 
 def _coordinator_main(args: argparse.Namespace) -> int:
-    workspace_root = Path(args.workspace).expanduser().resolve()
     cache_root = Path(args.cache_root).expanduser().resolve()
     runtime_dir = Path(args.runtime_dir).expanduser().resolve()
     controller = _CoordinatorController(
-        workspace_root=workspace_root,
         cache_root=cache_root,
         token=str(args.token),
         idle_seconds=int(args.idle_seconds),
@@ -951,12 +1067,10 @@ def _coordinator_main(args: argparse.Namespace) -> int:
 
 
 def _worker_main(args: argparse.Namespace) -> int:
-    workspace_root = Path(args.workspace).expanduser().resolve()
     cache_root = Path(args.cache_root).expanduser().resolve()
     python_bin = Path(sys.executable).resolve()
     backend = _build_backend(
         kind=str(args.kind),
-        workspace_root=workspace_root,
         cache_root=cache_root,
         model_id=str(args.model_id),
         backend_mode=str(args.backend_mode),
@@ -1023,7 +1137,6 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="role", required=True)
 
     coordinator = subparsers.add_parser("coordinator")
-    coordinator.add_argument("--workspace", required=True)
     coordinator.add_argument("--cache-root", required=True)
     coordinator.add_argument("--runtime-dir", required=True)
     coordinator.add_argument("--host", required=True)
@@ -1033,7 +1146,6 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator.add_argument("--backend-mode", default=_DEFAULT_BACKEND_MODE)
 
     worker = subparsers.add_parser("worker")
-    worker.add_argument("--workspace", required=True)
     worker.add_argument("--cache-root", required=True)
     worker.add_argument("--kind", required=True, choices=["generate", "analyze"])
     worker.add_argument("--model-id", required=True)
