@@ -126,6 +126,7 @@ This skill is self-contained for image generation and does not require another s
 
 # Notes
 
-- This skill calls the runtime-managed local model service through `HELIX_LOCAL_MODEL_SERVICE_URL`.
+- This skill calls the runtime-managed local PyTorch inference host through `HELIX_LOCAL_MODEL_SERVICE_URL`.
+- The host API is stable; this skill provides the `task_type`, `model_id`, and task-specific inputs.
 - The built-in model ID is `Tongyi-MAI/Z-Image-Turbo`.
 - The script expects the Docker runtime to inject both `HELIX_LOCAL_MODEL_SERVICE_URL` and `HELIX_LOCAL_MODEL_SERVICE_TOKEN`.

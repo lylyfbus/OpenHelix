@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -12,8 +13,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-_EXECUTED_SKILL = "analyze-image-from-pytorch"
-_MODEL_ID = "zai-org/GLM-OCR"
+_EXECUTED_SKILL = "analyze-image-from-ollama"
+_MODEL_ID = "glm-ocr"
+_DEFAULT_OLLAMA_BASE_URL = "http://host.docker.internal:11434"
 
 
 def _utc_now_compact() -> str:
@@ -44,10 +46,8 @@ def _ok(*, image_source: str, analysis: str, message: str) -> dict[str, Any]:
     }
 
 
-def _local_service_config() -> tuple[str, str]:
-    base_url = str(os.getenv("HELIX_LOCAL_MODEL_SERVICE_URL", "")).strip().rstrip("/")
-    token = str(os.getenv("HELIX_LOCAL_MODEL_SERVICE_TOKEN", "")).strip()
-    return base_url, token
+def _ollama_base_url() -> str:
+    return str(os.getenv("OLLAMA_BASE_URL", _DEFAULT_OLLAMA_BASE_URL)).strip().rstrip("/")
 
 
 def _resolve_relative_path(path_text: str) -> str:
@@ -71,7 +71,7 @@ def _download_to_workspace(image_url: str, timeout: int) -> str:
     req = Request(
         image_url,
         headers={
-            "User-Agent": "Mozilla/5.0 (HelixLocalImageSkill/1.0)",
+            "User-Agent": "Mozilla/5.0 (HelixOllamaImageSkill/1.0)",
             "Accept": "image/*,*/*;q=0.8",
         },
     )
@@ -80,21 +80,28 @@ def _download_to_workspace(image_url: str, timeout: int) -> str:
     if not raw:
         raise ValueError("downloaded image is empty")
     suffix = Path(urlparse(image_url).path).suffix or ".bin"
-    rel_dir = Path(".runtime") / "local-model-service" / "downloads"
+    rel_dir = Path(".runtime") / "ollama-image-analysis" / "downloads"
     rel_dir.mkdir(parents=True, exist_ok=True)
     rel_path = rel_dir / f"download_{_utc_now_compact()}{suffix}"
     rel_path.write_bytes(raw)
     return str(rel_path)
 
 
-def _post_json(url: str, payload: dict[str, Any], token: str, timeout: int) -> tuple[int, dict[str, Any] | None, str]:
+def _load_image_base64(relative_image_path: str) -> str:
+    resolved = (Path.cwd().resolve() / relative_image_path).resolve(strict=True)
+    workspace_root = Path.cwd().resolve()
+    try:
+        resolved.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValueError("path must stay inside the workspace") from exc
+    return base64.b64encode(resolved.read_bytes()).decode("ascii")
+
+
+def _post_json(url: str, payload: dict[str, Any], timeout: int) -> tuple[int, dict[str, Any] | None, str]:
     req = Request(
         url,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers={"Content-Type": "application/json"},
         data=json.dumps(payload).encode("utf-8"),
     )
     try:
@@ -110,7 +117,7 @@ def _post_json(url: str, payload: dict[str, Any], token: str, timeout: int) -> t
             parsed = None
         return int(exc.code), parsed if isinstance(parsed, dict) else None, body
     except URLError as exc:
-        raise RuntimeError(f"local model service request failed: {exc}") from exc
+        raise RuntimeError(f"ollama request failed: {exc}") from exc
 
 
 def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
@@ -126,22 +133,14 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             message="image query context is required; provide --query",
         ), 1
 
-    base_url, token = _local_service_config()
-    if not base_url or not token:
-        return _err(
-            image_source=image_source,
-            analysis="",
-            error_code="local_model_service_unavailable",
-            message="HELIX_LOCAL_MODEL_SERVICE_URL/TOKEN are not configured",
-        ), 1
-
     timeout = max(5, int(args.timeout))
     try:
         if image_path:
             relative_image_path = _resolve_relative_path(image_path)
         else:
             relative_image_path = _download_to_workspace(image_url, timeout)
-    except (ValueError, URLError, HTTPError) as exc:
+        image_b64 = _load_image_base64(relative_image_path)
+    except (ValueError, OSError, URLError, HTTPError) as exc:
         return _err(
             image_source=image_source,
             analysis="",
@@ -149,50 +148,64 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             message=str(exc),
         ), 1
 
-    payload = {
-        "model_id": _MODEL_ID,
-        "image_path": relative_image_path,
-        "query": query,
-        "workspace_root": str(Path.cwd().resolve()),
+    payload: dict[str, Any] = {
+        "model": _MODEL_ID,
+        "prompt": query,
+        "images": [image_b64],
+        "stream": False,
     }
+    keep_alive = str(os.getenv("OLLAMA_KEEP_ALIVE", "")).strip()
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
+
+    base_url = _ollama_base_url()
     try:
         status_code, parsed, body = _post_json(
-            f"{base_url}/v1/image/analyze",
+            f"{base_url}/api/generate",
             payload,
-            token,
             timeout,
         )
     except RuntimeError as exc:
         return _err(
             image_source=image_source,
             analysis="",
-            error_code="local_model_service_unavailable",
-            message=str(exc),
+            error_code="ollama_unavailable",
+            message=f"{exc}. Start Ollama with 'ollama serve' and install the model with 'ollama pull {_MODEL_ID}'.",
         ), 1
 
     parsed = parsed or {}
-    if status_code != 200 or parsed.get("status") != "ok":
+    if status_code != 200:
+        message = str(parsed.get("error", "")).strip() or body.strip() or "image analysis failed"
         return _err(
             image_source=image_source,
-            analysis=str(parsed.get("analysis", "")).strip(),
-            error_code=str(parsed.get("error_code", "")).strip() or "image_analysis_failed",
-            message=str(parsed.get("message", "")).strip() or body.strip() or "image analysis failed",
+            analysis="",
+            error_code="ollama_request_failed",
+            message=message,
+        ), 1
+
+    response_text = str(parsed.get("response", "")).strip()
+    if not response_text:
+        return _err(
+            image_source=image_source,
+            analysis="",
+            error_code="image_analysis_failed",
+            message=str(parsed.get("error", "")).strip() or "ollama returned an empty response",
         ), 1
 
     return _ok(
         image_source=image_source,
-        analysis=str(parsed.get("analysis", "")).strip(),
-        message=str(parsed.get("message", "")).strip() or "image analysis complete",
+        analysis=response_text,
+        message="image analysis complete",
     ), 0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Analyze an image with the built-in local PyTorch backend.")
+    parser = argparse.ArgumentParser(description="Analyze an image with the built-in Ollama GLM-OCR backend.")
     source_group = parser.add_mutually_exclusive_group(required=True)
     source_group.add_argument("--image-path", default="")
     source_group.add_argument("--image-url", default="")
     parser.add_argument("--query", required=True)
-    parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--timeout", type=int, default=300)
     return parser.parse_args()
 
 

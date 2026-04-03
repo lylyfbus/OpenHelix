@@ -155,7 +155,7 @@ def test_single_scaffold_validates():
         print("  single scaffold validates OK")
 
 
-def test_bootstrapped_pytorch_image_skills_validate():
+def test_bootstrapped_image_skills_validate():
     class FakeDockerExecutor:
         approval_profile = "docker-online-rw-workspace-v1:test"
 
@@ -194,11 +194,11 @@ def test_bootstrapped_pytorch_image_skills_validate():
 
         analyze_validate = skill_creation.run_validate(
             workspace=workspace,
-            skill_id="analyze-image-from-pytorch",
+            skill_id="analyze-image-from-ollama",
             scope="all-agents",
         )
         assert analyze_validate["status"] == "ok", analyze_validate["skill_created/updated"]
-        print("  bootstrapped pytorch image skills validate OK")
+        print("  bootstrapped image skills validate OK")
 
 
 if __name__ == "__main__":
@@ -207,5 +207,5 @@ if __name__ == "__main__":
     test_multi_scaffold_creates_phase_scripts()
     test_validate_multi_requires_multiple_scripts()
     test_single_scaffold_validates()
-    test_bootstrapped_pytorch_image_skills_validate()
+    test_bootstrapped_image_skills_validate()
     print("\n✅ All skill-creation script tests passed!")

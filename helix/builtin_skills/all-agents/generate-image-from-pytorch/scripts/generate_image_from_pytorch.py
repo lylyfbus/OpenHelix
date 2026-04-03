@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 _EXECUTED_SKILL = "generate-image-from-pytorch"
 _MODEL_ID = "Tongyi-MAI/Z-Image-Turbo"
+_TASK_TYPE = "image_generation"
 
 
 def _utc_now_compact() -> str:
@@ -134,16 +135,19 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         ), 1
 
     payload = {
+        "task_type": _TASK_TYPE,
         "model_id": _MODEL_ID,
-        "prompt": prompt,
-        "size": str(args.size or "1024x1024"),
-        "output_path": output_path,
         "workspace_root": str(Path.cwd().resolve()),
+        "inputs": {
+            "prompt": prompt,
+            "size": str(args.size or "1024x1024"),
+            "output_path": output_path,
+        },
     }
     timeout = max(5, int(args.timeout))
     try:
         status_code, parsed, body = _post_json(
-            f"{base_url}/v1/image/generate",
+            f"{base_url}/infer",
             payload,
             token,
             timeout,

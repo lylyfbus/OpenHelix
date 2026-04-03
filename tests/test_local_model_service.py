@@ -106,8 +106,6 @@ def test_local_model_service_default_cache_root_is_global(monkeypatch: pytest.Mo
 def test_local_model_service_auth_and_path_validation(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        image_path = workspace / "sample.png"
-        image_path.write_bytes(b"png")
         manager = _start_manager(workspace, monkeypatch)
         try:
             env = manager.tool_environment()
@@ -115,12 +113,16 @@ def test_local_model_service_auth_and_path_validation(monkeypatch: pytest.Monkey
 
             status, _, parsed = _http_json_request(
                 method="POST",
-                url=f"{base_url}/v1/image/generate",
+                url=f"{base_url}/infer",
                 payload={
+                    "task_type": "image_generation",
                     "model_id": "Tongyi-MAI/Z-Image-Turbo",
-                    "prompt": "hello",
-                    "size": "1024x1024",
-                    "output_path": "generated_images/test.png",
+                    "workspace_root": str(workspace.resolve()),
+                    "inputs": {
+                        "prompt": "hello",
+                        "size": "1024x1024",
+                        "output_path": "generated_images/test.png",
+                    },
                 },
             )
             assert status == 401
@@ -128,13 +130,17 @@ def test_local_model_service_auth_and_path_validation(monkeypatch: pytest.Monkey
 
             status, _, parsed = _http_json_request(
                 method="POST",
-                url=f"{base_url}/v1/image/analyze",
+                url=f"{base_url}/infer",
                 token=env["HELIX_LOCAL_MODEL_SERVICE_TOKEN"],
                 payload={
+                    "task_type": "image_generation",
                     "workspace_root": str(workspace.resolve()),
-                    "model_id": "zai-org/GLM-OCR",
-                    "image_path": "../escape.png",
-                    "query": "extract text",
+                    "model_id": "Tongyi-MAI/Z-Image-Turbo",
+                    "inputs": {
+                        "prompt": "hello",
+                        "size": "1024x1024",
+                        "output_path": "../escape.png",
+                    },
                 },
             )
             assert status == 400
@@ -147,8 +153,6 @@ def test_local_model_service_auth_and_path_validation(monkeypatch: pytest.Monkey
 def test_local_model_service_worker_switch_and_idle_eviction(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        image_path = workspace / "sample.png"
-        image_path.write_bytes(b"png")
         manager = _start_manager(workspace, monkeypatch, idle_seconds=1)
         try:
             env = manager.tool_environment()
@@ -157,13 +161,17 @@ def test_local_model_service_worker_switch_and_idle_eviction(monkeypatch: pytest
 
             status, _, parsed = _http_json_request(
                 method="POST",
-                url=f"{base_url}/v1/image/analyze",
+                url=f"{base_url}/infer",
                 token=token,
                 payload={
+                    "task_type": "image_generation",
                     "workspace_root": str(workspace.resolve()),
-                    "model_id": "zai-org/GLM-OCR",
-                    "image_path": "sample.png",
-                    "query": "extract visible text",
+                    "model_id": "Tongyi-MAI/Z-Image-Turbo",
+                    "inputs": {
+                        "prompt": "a bright square",
+                        "size": "1024x1024",
+                        "output_path": "generated_images/first.png",
+                    },
                 },
             )
             assert status == 200
@@ -171,27 +179,30 @@ def test_local_model_service_worker_switch_and_idle_eviction(monkeypatch: pytest
             health_status, _, health = _http_json_request(method="GET", url=f"{base_url}/health")
             assert health_status == 200
             first_pid = int(health["worker_pid"])
-            assert health["worker_kind"] == "analyze"
-            assert health["worker_model_id"] == "zai-org/GLM-OCR"
+            assert health["worker_task_type"] == "image_generation"
+            assert health["worker_model_id"] == "Tongyi-MAI/Z-Image-Turbo"
 
             status, _, parsed = _http_json_request(
                 method="POST",
-                url=f"{base_url}/v1/image/generate",
+                url=f"{base_url}/infer",
                 token=token,
                 payload={
+                    "task_type": "image_generation",
                     "workspace_root": str(workspace.resolve()),
-                    "model_id": "Tongyi-MAI/Z-Image-Turbo",
-                    "prompt": "a bright square",
-                    "size": "1024x1024",
-                    "output_path": "generated_images/test.png",
+                    "model_id": "Tongyi-MAI/Z-Image-Turbo-q4",
+                    "inputs": {
+                        "prompt": "a darker square",
+                        "size": "1024x1024",
+                        "output_path": "generated_images/second.png",
+                    },
                 },
             )
             assert status == 200
             assert parsed["status"] == "ok"
             health_status, _, health = _http_json_request(method="GET", url=f"{base_url}/health")
             assert health_status == 200
-            assert health["worker_kind"] == "generate"
-            assert health["worker_model_id"] == "Tongyi-MAI/Z-Image-Turbo"
+            assert health["worker_task_type"] == "image_generation"
+            assert health["worker_model_id"] == "Tongyi-MAI/Z-Image-Turbo-q4"
             assert int(health["worker_pid"]) != first_pid
 
             deadline = time.time() + 5

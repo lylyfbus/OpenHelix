@@ -1,4 +1,4 @@
-"""Host-native local model service for Apple Silicon image skills."""
+"""Host-native local model inference service for Apple Silicon PyTorch skills."""
 
 from __future__ import annotations
 
@@ -43,8 +43,9 @@ _FAKE_PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9pob7XUAAAAASUVORK5CYII="
 )
 _LOCAL_MODEL_SERVICE_NAME = "local-model-service"
-_DEFAULT_ANALYSIS_MODEL_ID = "zai-org/GLM-OCR"
 _DEFAULT_GENERATION_MODEL_ID = "Tongyi-MAI/Z-Image-Turbo"
+_TASK_IMAGE_GENERATION = "image_generation"
+_SUPPORTED_TASK_TYPES = (_TASK_IMAGE_GENERATION,)
 _GENERATION_DEPENDENCIES = (
     "accelerate",
     "diffusers>=0.35.0",
@@ -54,14 +55,6 @@ _GENERATION_DEPENDENCIES = (
     "torch",
     "transformers",
 )
-_ANALYSIS_DEPENDENCIES = (
-    "accelerate",
-    "pillow",
-    "torch",
-    "transformers",
-)
-
-
 def local_model_service_supported() -> bool:
     """Return whether the host runtime should use the local model service."""
     return sys.platform == "darwin" and platform.machine().lower() == "arm64"
@@ -301,7 +294,7 @@ def _ensure_worker_dependencies(python_bin: Path, dependencies: tuple[str, ...])
 
 @dataclass
 class _WorkerState:
-    kind: str
+    task_type: str
     model_id: str
     process: subprocess.Popen[str]
     stdout_queue: "queue.Queue[str]"
@@ -320,12 +313,20 @@ class _WorkerBackend(Protocol):
         ...
 
 
+def _request_inputs(payload: dict[str, Any]) -> dict[str, Any]:
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, dict):
+        raise ValueError("inputs must be a JSON object")
+    return inputs
+
+
 class _FakeImageGenerationBackend:
     def __init__(self, model_id: str) -> None:
         self.model_id = model_id
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
-        prompt = str(payload.get("prompt", "")).strip()
+        inputs = _request_inputs(payload)
+        prompt = str(inputs.get("prompt", "")).strip()
         if not prompt:
             return {
                 "status": "error",
@@ -337,7 +338,7 @@ class _FakeImageGenerationBackend:
         workspace_root = _resolve_service_workspace_root(payload)
         resolved = _resolve_workspace_path(
             workspace_root,
-            str(payload.get("output_path", "")).strip(),
+            str(inputs.get("output_path", "")).strip(),
             expect_exists=False,
         )
         resolved.write_bytes(_FAKE_PNG_BYTES)
@@ -349,133 +350,6 @@ class _FakeImageGenerationBackend:
             "error_code": "",
             "message": f"generated placeholder image at {output_path}",
         }
-
-
-class _FakeImageAnalysisBackend:
-    def __init__(self, model_id: str) -> None:
-        self.model_id = model_id
-
-    def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
-        query = str(payload.get("query", "")).strip()
-        if not query:
-            return {
-                "status": "error",
-                "analysis": "",
-                "model_id": self.model_id,
-                "error_code": "image_query_missing",
-                "message": "query is required",
-            }
-        workspace_root = _resolve_service_workspace_root(payload)
-        resolved = _resolve_workspace_path(
-            workspace_root,
-            str(payload.get("image_path", "")).strip(),
-            expect_exists=True,
-        )
-        image_path = str(resolved.relative_to(workspace_root))
-        return {
-            "status": "ok",
-            "analysis": f"fake-analysis: {query} ({image_path})",
-            "model_id": self.model_id,
-            "error_code": "",
-            "message": "analysis complete",
-        }
-
-
-class _RealImageAnalysisBackend:
-    def __init__(self, model_id: str, cache_root: Path, python_bin: Path) -> None:
-        self.model_id = model_id
-        self.cache_root = cache_root
-        self.python_bin = python_bin
-        self.processor: Any | None = None
-        self.model: Any | None = None
-        self.device: str | None = None
-        self._load()
-
-    def _load(self) -> None:
-        try:
-            from PIL import Image  # noqa: F401
-            import torch
-            from transformers import AutoModelForImageTextToText, AutoProcessor
-        except ImportError:
-            _ensure_worker_dependencies(self.python_bin, _ANALYSIS_DEPENDENCIES)
-            from PIL import Image  # noqa: F401
-            import torch
-            from transformers import AutoModelForImageTextToText, AutoProcessor
-
-        device = "mps" if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available() else "cpu"
-        self.device = device
-        dtype = torch.float16 if device == "mps" else torch.float32
-        hub_cache = self.cache_root / "models"
-        hub_cache.mkdir(parents=True, exist_ok=True)
-        self.processor = AutoProcessor.from_pretrained(
-            self.model_id,
-            cache_dir=str(hub_cache),
-        )
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            pretrained_model_name_or_path=self.model_id,
-            torch_dtype=dtype,
-            cache_dir=str(hub_cache),
-        )
-        self.model.to(device)
-
-    def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
-        workspace_root = _resolve_service_workspace_root(payload)
-        resolved = _resolve_workspace_path(
-            workspace_root,
-            str(payload.get("image_path", "")).strip(),
-            expect_exists=True,
-        )
-        query = str(payload.get("query", "")).strip()
-        if not query:
-            return {
-                "status": "error",
-                "analysis": "",
-                "model_id": self.model_id,
-                "error_code": "image_query_missing",
-                "message": "query is required",
-            }
-        try:
-            from PIL import Image
-            image = Image.open(resolved)
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "url": str(resolved)},
-                        {"type": "text", "text": query},
-                    ],
-                }
-            ]
-            assert self.processor is not None
-            assert self.model is not None
-            inputs = self.processor.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-                return_dict=True,
-                return_tensors="pt",
-            ).to(self.model.device)
-            inputs.pop("token_type_ids", None)
-            generated_ids = self.model.generate(**inputs, max_new_tokens=8192)
-            output_text = self.processor.decode(
-                generated_ids[0][inputs["input_ids"].shape[1]:],
-                skip_special_tokens=False,
-            )
-            return {
-                "status": "ok",
-                "analysis": str(output_text).strip(),
-                "model_id": self.model_id,
-                "error_code": "",
-                "message": "analysis complete",
-            }
-        except Exception as exc:
-            return {
-                "status": "error",
-                "analysis": "",
-                "model_id": self.model_id,
-                "error_code": "analysis_runtime_error",
-                "message": str(exc),
-            }
 
 
 class _RealImageGenerationBackend:
@@ -510,7 +384,8 @@ class _RealImageGenerationBackend:
         self.pipeline.to(device)
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
-        prompt = str(payload.get("prompt", "")).strip()
+        inputs = _request_inputs(payload)
+        prompt = str(inputs.get("prompt", "")).strip()
         if not prompt:
             return {
                 "status": "error",
@@ -521,10 +396,10 @@ class _RealImageGenerationBackend:
             }
         try:
             workspace_root = _resolve_service_workspace_root(payload)
-            width, height = _parse_size(str(payload.get("size", "")).strip())
+            width, height = _parse_size(str(inputs.get("size", "")).strip())
             output_path = _resolve_workspace_path(
                 workspace_root,
-                str(payload.get("output_path", "")).strip(),
+                str(inputs.get("output_path", "")).strip(),
                 expect_exists=False,
             )
             assert self.pipeline is not None
@@ -555,19 +430,17 @@ class _RealImageGenerationBackend:
 
 def _build_backend(
     *,
-    kind: str,
+    task_type: str,
     cache_root: Path,
     model_id: str,
     backend_mode: str,
     python_bin: Path,
 ) -> _WorkerBackend:
+    if task_type != _TASK_IMAGE_GENERATION:
+        raise ValueError(f"unsupported task_type: {task_type}")
     if backend_mode == _FAKE_BACKEND_NAME:
-        if kind == "generate":
-            return _FakeImageGenerationBackend(model_id)
-        return _FakeImageAnalysisBackend(model_id)
-    if kind == "generate":
-        return _RealImageGenerationBackend(model_id, cache_root, python_bin)
-    return _RealImageAnalysisBackend(model_id, cache_root, python_bin)
+        return _FakeImageGenerationBackend(model_id)
+    return _RealImageGenerationBackend(model_id, cache_root, python_bin)
 
 
 class _CoordinatorController:
@@ -608,22 +481,34 @@ class _CoordinatorController:
                 "status": "ok",
                 "backend_mode": self.backend_mode,
                 "worker_active": worker is not None and worker.process.poll() is None,
-                "worker_kind": worker.kind if worker else "",
+                "worker_task_type": worker.task_type if worker else "",
+                "worker_kind": worker.task_type if worker else "",
                 "worker_model_id": worker.model_id if worker else "",
                 "worker_pid": worker.pid if worker else 0,
             }
 
-    def handle_request(self, *, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def handle_request(self, *, payload: dict[str, Any]) -> dict[str, Any]:
+        task_type = str(payload.get("task_type", "")).strip()
+        if not task_type:
+            return {
+                "status": "error",
+                "task_type": "",
+                "model_id": "",
+                "error_code": "task_type_missing",
+                "message": "task_type is required",
+            }
         model_id = str(payload.get("model_id", "")).strip()
         if not model_id:
             return {
                 "status": "error",
+                "task_type": task_type,
                 "model_id": "",
                 "error_code": "model_id_missing",
                 "message": "model_id is required",
             }
+        _request_inputs(payload)
         with self._lock:
-            worker = self._ensure_worker_locked(kind=kind, model_id=model_id)
+            worker = self._ensure_worker_locked(task_type=task_type, model_id=model_id)
             self._last_used_at = time.time()
         return self._request_worker(worker, payload)
 
@@ -647,22 +532,22 @@ class _CoordinatorController:
             raise RuntimeError("worker response must be a JSON object")
         return parsed
 
-    def _ensure_worker_locked(self, *, kind: str, model_id: str) -> _WorkerState:
+    def _ensure_worker_locked(self, *, task_type: str, model_id: str) -> _WorkerState:
         worker = self._worker_state
         if (
             worker is not None
             and worker.process.poll() is None
-            and worker.kind == kind
+            and worker.task_type == task_type
             and worker.model_id == model_id
         ):
             return worker
         self._stop_worker_locked()
-        self._worker_state = self._start_worker_locked(kind=kind, model_id=model_id)
+        self._worker_state = self._start_worker_locked(task_type=task_type, model_id=model_id)
         return self._worker_state
 
-    def _start_worker_locked(self, *, kind: str, model_id: str) -> _WorkerState:
+    def _start_worker_locked(self, *, task_type: str, model_id: str) -> _WorkerState:
         python_bin = _worker_python(self.cache_root)
-        log_path = self.runtime_dir / f"worker-{kind}-{int(time.time())}.log"
+        log_path = self.runtime_dir / f"worker-{task_type}-{int(time.time())}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_handle = log_path.open("a", encoding="utf-8")
         cmd = [
@@ -670,8 +555,8 @@ class _CoordinatorController:
             "-m",
             "helix.core.local_model_service",
             "worker",
-            "--kind",
-            kind,
+            "--task-type",
+            task_type,
             "--model-id",
             model_id,
             "--cache-root",
@@ -723,7 +608,7 @@ class _CoordinatorController:
             detail = log_path.read_text(encoding="utf-8", errors="replace").strip()
             raise RuntimeError(detail or "worker startup timed out")
         return _WorkerState(
-            kind=kind,
+            task_type=task_type,
             model_id=model_id,
             process=process,
             stdout_queue=stdout_queue,
@@ -812,10 +697,8 @@ class _CoordinatorHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            if self.path == "/v1/image/generate":
-                out = self.server.controller.handle_request(kind="generate", payload=payload)
-            elif self.path == "/v1/image/analyze":
-                out = self.server.controller.handle_request(kind="analyze", payload=payload)
+            if self.path == "/infer":
+                out = self.server.controller.handle_request(payload=payload)
             else:
                 self._send_json(
                     HTTPStatus.NOT_FOUND,
@@ -1070,7 +953,7 @@ def _worker_main(args: argparse.Namespace) -> int:
     cache_root = Path(args.cache_root).expanduser().resolve()
     python_bin = Path(sys.executable).resolve()
     backend = _build_backend(
-        kind=str(args.kind),
+        task_type=str(args.task_type),
         cache_root=cache_root,
         model_id=str(args.model_id),
         backend_mode=str(args.backend_mode),
@@ -1080,7 +963,7 @@ def _worker_main(args: argparse.Namespace) -> int:
         json.dumps(
             {
                 "status": "ready",
-                "kind": str(args.kind),
+                "task_type": str(args.task_type),
                 "model_id": str(args.model_id),
                 "pid": os.getpid(),
             },
@@ -1147,7 +1030,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker = subparsers.add_parser("worker")
     worker.add_argument("--cache-root", required=True)
-    worker.add_argument("--kind", required=True, choices=["generate", "analyze"])
+    worker.add_argument("--task-type", required=True, choices=list(_SUPPORTED_TASK_TYPES))
     worker.add_argument("--model-id", required=True)
     worker.add_argument("--backend-mode", default=_DEFAULT_BACKEND_MODE)
 

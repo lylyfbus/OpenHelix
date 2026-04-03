@@ -88,7 +88,7 @@ def test_real_skill_loading():
     # Should find all 9 built-in skills (7 non-loader + 2 loaders)
     assert "search-online-context" in skill_ids, f"Missing search-online-context, got: {skill_ids}"
     assert "generate-image-from-pytorch" in skill_ids
-    assert "analyze-image-from-pytorch" in skill_ids
+    assert "analyze-image-from-ollama" in skill_ids
     assert "documentation-distillation" in skill_ids
     assert "file-based-planning" in skill_ids
     assert "skill-creation" in skill_ids
@@ -180,6 +180,7 @@ def test_bootstrap_skills():
         assert len(skill_dirs) == 9, f"Expected 9, got {len(skill_dirs)}: {skill_dirs}"
         assert "search-online-context" in skill_dirs
         assert "generate-image-from-pytorch" in skill_dirs
+        assert "analyze-image-from-ollama" in skill_dirs
         assert "load-skill" in skill_dirs
         print(f"  Bootstrap skills OK ({len(skill_dirs)} skills synced)")
 
@@ -194,6 +195,7 @@ def test_bootstrapped_prompt_builder():
         assert len(prompt) > 500, f"System prompt too short ({len(prompt)} chars)"
         assert "search-online-context" in prompt
         assert "generate-image-from-pytorch" in prompt
+        assert "analyze-image-from-ollama" in prompt
         assert "load-skill" in prompt
         assert "load-knowledge-docs" not in prompt
 

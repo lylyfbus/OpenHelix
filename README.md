@@ -150,7 +150,7 @@ Precedence is:
 
 | Variable | Used by | Default / Notes |
 |---|---|---|
-| `OLLAMA_BASE_URL` | core provider | `http://localhost:11434` for the core provider |
+| `OLLAMA_BASE_URL` | core provider, `analyze-image-from-ollama` skill | `http://localhost:11434` on the host; Docker execs translate loopback to `host.docker.internal` automatically |
 | `OLLAMA_MODEL` | core provider | `llama3.1:8b` |
 | `OLLAMA_TIMEOUT_SECONDS` | core provider | `300` |
 | `OLLAMA_KEEP_ALIVE` | core provider | optional Ollama keep-alive duration |
@@ -173,9 +173,9 @@ Precedence is:
 | Variable | Used by | Default / Notes |
 |---|---|---|
 | `SEARXNG_BASE_URL` | search-online-context skill | injected automatically by the Docker runtime for sandboxed search execs |
-| `HELIX_LOCAL_MODEL_SERVICE_URL` | local PyTorch image skills | injected automatically by the Docker runtime on macOS Apple Silicon |
-| `HELIX_LOCAL_MODEL_SERVICE_TOKEN` | local PyTorch image skills | injected automatically by the Docker runtime on macOS Apple Silicon |
-| `HF_TOKEN` | Hugging Face-backed local PyTorch image skills | recommended before starting Helix so local model downloads/auth work reliably |
+| `HELIX_LOCAL_MODEL_SERVICE_URL` | local PyTorch skills | injected automatically by the Docker runtime on macOS Apple Silicon; points to the Helix-owned local inference host |
+| `HELIX_LOCAL_MODEL_SERVICE_TOKEN` | local PyTorch skills | injected automatically by the Docker runtime on macOS Apple Silicon |
+| `HF_TOKEN` | Hugging Face-backed local PyTorch skills | recommended before starting Helix so local model downloads/auth work reliably |
 | `HELIX_HOME` | shared Helix service state | override the default global Helix home at `~/.helix` |
 
 ### Runtime Controls
@@ -227,18 +227,39 @@ The inspection commands operate on the active named session.
 
 The built-in image capabilities are skill-owned rather than CLI-configured:
 
-- `analyze-image-from-pytorch` uses `zai-org/GLM-OCR`
+- `analyze-image-from-ollama` uses `glm-ocr` through a local Ollama daemon
 - `generate-image-from-pytorch` uses `Tongyi-MAI/Z-Image-Turbo`
 
-On macOS Apple Silicon, the Docker runtime starts a narrow host-native local model service and injects the service URL/token into Docker execs automatically. The core Helix CLI does not expose separate image provider/model flags.
+The core Helix CLI does not expose separate image provider/model flags.
 
-The local model service is shared across all Helix runtimes on the machine:
+`analyze-image-from-ollama` calls Ollama directly from inside the Docker sandbox:
+
+- Helix does not start or stop Ollama for you
+- make sure `ollama serve` is running before you launch Helix
+- install the OCR model with `ollama pull glm-ocr`
+- if you use a non-default Ollama URL, set `OLLAMA_BASE_URL` before launching Helix
+
+On macOS Apple Silicon, the Docker runtime still starts a narrow host-native local PyTorch inference service for PyTorch-backed skills and injects the service URL/token into Docker execs automatically.
+
+That host is stable across skills:
+
+- Helix owns the service lifecycle and worker memory management
+- the host exposes one fixed inference endpoint at `/infer`
+- skills choose the `model_id`, `task_type`, and task-specific `inputs` they send to the service
+- Helix core does not expose image backend flags through the CLI
+
+So the boundary is:
+
+- Ollama-backed skills call Ollama directly
+- PyTorch-backed skills call the Helix-owned local inference host
+
+That local inference service is shared across all Helix runtimes on the machine:
 
 - the first active Helix runtime starts it
 - later Helix runtimes reuse it
 - it is stopped when the last Helix runtime exits
 
-If you use the Hugging Face-backed local image skills, export `HF_TOKEN` before launching Helix and restart Helix after changing that token.
+If you use the Hugging Face-backed local PyTorch skills, export `HF_TOKEN` before launching Helix and restart Helix after changing that token.
 
 ### Web Search: SearXNG
 
