@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helix.core.local_model_service import (
     LocalModelServiceManager,
+    _CoordinatorController,
     _RealImageGenerationBackend,
     _http_json_request,
     _kill_process_tree,
@@ -321,3 +323,53 @@ def test_real_image_generation_backend_loads_lazily(monkeypatch: pytest.MonkeyPa
         assert calls["count"] == 1
         assert result["status"] == "ok"
         assert result["output_path"] == "generated/demo.png"
+
+
+def test_worker_env_enables_hf_xet_high_performance(monkeypatch: pytest.MonkeyPatch):
+    captured_env: dict[str, str] = {}
+
+    class FakeProcess:
+        def __init__(self, env: dict[str, str]) -> None:
+            self.pid = 43210
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO('{"status":"ready","task_type":"image_generation","model_id":"Tongyi-MAI/Z-Image-Turbo","pid":43210}\n')
+            self._env = env
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    def fake_popen(*args, **kwargs):
+        nonlocal captured_env
+        captured_env = dict(kwargs["env"])
+        return FakeProcess(captured_env)
+
+    monkeypatch.setattr("helix.core.local_model_service._worker_python", lambda cache_root: Path("/tmp/fake-python"))
+    monkeypatch.setattr("helix.core.local_model_service.subprocess.Popen", fake_popen)
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        controller = _CoordinatorController(
+            cache_root=root / "cache",
+            token="token",
+            idle_seconds=300,
+            backend_mode="fake",
+            runtime_dir=root / "runtime",
+        )
+        try:
+            worker = controller._start_worker_locked(
+                task_type="image_generation",
+                model_id="Tongyi-MAI/Z-Image-Turbo",
+            )
+            assert worker.pid == 43210
+            assert captured_env["HF_XET_HIGH_PERFORMANCE"] == "1"
+        finally:
+            controller.close()

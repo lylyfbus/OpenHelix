@@ -573,6 +573,7 @@ class _CoordinatorController:
         env.setdefault("HF_HOME", str(self.cache_root / "models"))
         env.setdefault("TRANSFORMERS_CACHE", str(self.cache_root / "models"))
         env.setdefault("HF_HUB_CACHE", str(self.cache_root / "models"))
+        env.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
