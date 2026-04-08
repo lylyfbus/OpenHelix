@@ -9,8 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from helix.providers.ollama import OllamaProvider
-from helix.providers.openai_compat import OpenAICompatProvider
+from helix.providers.openai_compat import LLMProvider
 from helix.core.agent import Agent
 from helix.core.agent import _load_skills as load_skills
 from helix.core.agent import _load_knowledge_catalog as load_knowledge_catalog
@@ -23,87 +22,80 @@ from helix.core.state import State, Turn
 # =========================================================================== #
 
 
-def test_ollama_provider_init():
-    """Verify OllamaProvider initializes with correct defaults."""
-    provider = OllamaProvider()
+def test_llm_provider_default_init():
+    """Verify LLMProvider initializes with correct defaults."""
+    provider = LLMProvider()
     assert provider.model == "llama3.1:8b"
     assert "11434" in provider.endpoint
     assert provider.timeout == 300
-    print("  OllamaProvider init OK")
+    assert "/v1/chat/completions" in provider.endpoint
+    print("  LLMProvider default init OK")
 
 
-def test_ollama_provider_custom_init():
-    """Verify OllamaProvider respects custom parameters."""
-    provider = OllamaProvider(
+def test_llm_provider_custom_init():
+    """Verify LLMProvider respects custom parameters."""
+    provider = LLMProvider(
+        base_url="http://myhost:8080/v1",
+        api_key="test-key",
         model="deepseek-r1:14b",
-        base_url="http://myhost:8080",
         timeout=60,
         temperature=0.5,
     )
     assert provider.model == "deepseek-r1:14b"
     assert "myhost:8080" in provider.endpoint
     assert provider.timeout == 60
-    print("  OllamaProvider custom init OK")
+    assert provider.api_key == "test-key"
+    print("  LLMProvider custom init OK")
 
 
-def test_openai_provider_init():
-    """Verify OpenAICompatProvider initializes with correct defaults."""
-    provider = OpenAICompatProvider()
-    assert provider.model == "local-model"
-    assert "/chat/completions" in provider.endpoint
-    print("  OpenAICompatProvider init OK")
+def test_llm_provider_auto_appends_v1():
+    """Verify base URL without /v1 suffix gets it appended."""
+    provider = LLMProvider(base_url="https://api.deepseek.com")
+    assert provider.endpoint == "https://api.deepseek.com/v1/chat/completions"
+    print("  LLMProvider auto-appends /v1 OK")
 
 
-def test_openai_provider_presets():
-    """Verify preset resolution for known providers."""
-    dp = OpenAICompatProvider(provider="deepseek")
-    assert "deepseek.com" in dp.endpoint
-    assert dp.model == "deepseek-chat"
-
-    zai = OpenAICompatProvider(provider="zai")
-    assert "z.ai" in zai.endpoint
-
-    lm = OpenAICompatProvider(provider="lmstudio", model="my-model")
-    assert lm.model == "my-model"
-    print("  OpenAICompatProvider presets OK")
+def test_llm_provider_preserves_existing_v1():
+    """Verify base URL with /v1 suffix is not doubled."""
+    provider = LLMProvider(base_url="http://localhost:1234/v1")
+    assert provider.endpoint == "http://localhost:1234/v1/chat/completions"
+    print("  LLMProvider preserves /v1 OK")
 
 
-def test_openai_provider_requires_api_key_for_zai():
-    """Verify Z.AI fails fast with a clear message when the API key is missing."""
-    with patch.dict("os.environ", {}, clear=True):
-        provider = OpenAICompatProvider(provider="zai")
-        try:
-            provider.generate("hello")
-            assert False, "Expected missing API key to raise"
-        except RuntimeError as exc:
-            assert "Missing API key" in str(exc)
-            assert "ZAI_API_KEY" in str(exc)
-    print("  OpenAICompatProvider missing Z.AI key OK")
+def test_llm_provider_env_vars():
+    """Verify LLMProvider reads from environment variables."""
+    env = {
+        "LLM_BASE_URL": "http://envhost:9999/v1",
+        "LLM_API_KEY": "env-key",
+        "LLM_MODEL": "env-model",
+    }
+    with patch.dict("os.environ", env, clear=True):
+        provider = LLMProvider()
+    assert "envhost:9999" in provider.endpoint
+    assert provider.api_key == "env-key"
+    assert provider.model == "env-model"
+    print("  LLMProvider env vars OK")
 
 
-def test_openai_provider_requires_api_key_for_deepseek():
-    """Verify DeepSeek fails fast with a clear message when the API key is missing."""
-    with patch.dict("os.environ", {}, clear=True):
-        provider = OpenAICompatProvider(provider="deepseek")
-        try:
-            provider.generate("hello")
-            assert False, "Expected missing API key to raise"
-        except RuntimeError as exc:
-            assert "Missing API key" in str(exc)
-            assert "DEEPSEEK_API_KEY" in str(exc)
-    print("  OpenAICompatProvider missing DeepSeek key OK")
+def test_llm_provider_explicit_overrides_env():
+    """Verify explicit constructor args override env vars."""
+    env = {"LLM_BASE_URL": "http://envhost:9999", "LLM_MODEL": "env-model"}
+    with patch.dict("os.environ", env, clear=True):
+        provider = LLMProvider(base_url="http://explicit:1234/v1", model="explicit-model")
+    assert "explicit:1234" in provider.endpoint
+    assert provider.model == "explicit-model"
+    print("  LLMProvider explicit overrides env OK")
 
 
 def test_provider_satisfies_protocol():
-    """Verify both providers have the generate() interface matching ModelProvider."""
+    """Verify LLMProvider has the generate() interface matching ModelProvider."""
     import inspect
-    for cls in [OllamaProvider, OpenAICompatProvider]:
-        assert hasattr(cls, "generate"), f"{cls.__name__} missing generate()"
-        sig = inspect.signature(cls.generate)
-        params = list(sig.parameters.keys())
-        assert "prompt" in params, f"{cls.__name__}.generate() missing prompt param"
-        assert "stream" in params, f"{cls.__name__}.generate() missing stream param"
-        assert "chunk_callback" in params, f"{cls.__name__}.generate() missing chunk_callback param"
+    assert hasattr(LLMProvider, "generate"), "LLMProvider missing generate()"
+    sig = inspect.signature(LLMProvider.generate)
+    params = list(sig.parameters.keys())
+    assert "prompt" in params
+    assert "stream" in params
+    assert "chunk_callback" in params
     print("  Protocol compliance OK")
 
 
@@ -121,8 +113,8 @@ class _MockHTTPResponse:
         return self._body
 
 
-def test_openai_provider_stream_timeout_wrapped_as_runtime_error():
-    provider = OpenAICompatProvider()
+def test_llm_provider_stream_timeout_wrapped_as_runtime_error():
+    provider = LLMProvider()
 
     with patch(
         "helix.providers.openai_compat.urlopen",
@@ -132,29 +124,29 @@ def test_openai_provider_stream_timeout_wrapped_as_runtime_error():
             provider.generate("hello", stream=True)
             assert False, "Expected streaming timeout to raise RuntimeError"
         except RuntimeError as exc:
-            assert "openai_compatible network error" in str(exc)
+            assert "LLM network error" in str(exc)
             assert "read timed out" in str(exc)
-    print("  OpenAICompatProvider stream timeout wrapping OK")
+    print("  LLMProvider stream timeout wrapping OK")
 
 
-def test_ollama_provider_stream_disconnect_wrapped_as_runtime_error():
-    provider = OllamaProvider()
+def test_llm_provider_stream_disconnect_wrapped_as_runtime_error():
+    provider = LLMProvider()
 
     with patch(
-        "helix.providers.ollama.urlopen",
+        "helix.providers.openai_compat.urlopen",
         side_effect=RemoteDisconnected("closed"),
     ):
         try:
             provider.generate("hello", stream=True)
             assert False, "Expected stream disconnect to raise RuntimeError"
         except RuntimeError as exc:
-            assert "Ollama network error" in str(exc)
+            assert "LLM network error" in str(exc)
             assert "closed" in str(exc)
-    print("  OllamaProvider stream disconnect wrapping OK")
+    print("  LLMProvider stream disconnect wrapping OK")
 
 
-def test_openai_provider_non_stream_invalid_json_wrapped_as_runtime_error():
-    provider = OpenAICompatProvider()
+def test_llm_provider_non_stream_invalid_json_wrapped_as_runtime_error():
+    provider = LLMProvider()
 
     with patch(
         "helix.providers._http.urlopen",
@@ -164,8 +156,8 @@ def test_openai_provider_non_stream_invalid_json_wrapped_as_runtime_error():
             provider.generate("hello", stream=False)
             assert False, "Expected invalid JSON response to raise RuntimeError"
         except RuntimeError as exc:
-            assert "openai_compatible invalid JSON response" in str(exc)
-    print("  OpenAICompatProvider invalid JSON wrapping OK")
+            assert "LLM invalid JSON response" in str(exc)
+    print("  LLMProvider invalid JSON wrapping OK")
 
 
 # =========================================================================== #
@@ -426,12 +418,12 @@ def test_prompt_builder_no_prompts():
 
 if __name__ == "__main__":
     print("=== Provider Initialization ===")
-    test_ollama_provider_init()
-    test_ollama_provider_custom_init()
-    test_openai_provider_init()
-    test_openai_provider_presets()
-    test_openai_provider_requires_api_key_for_zai()
-    test_openai_provider_requires_api_key_for_deepseek()
+    test_llm_provider_default_init()
+    test_llm_provider_custom_init()
+    test_llm_provider_auto_appends_v1()
+    test_llm_provider_preserves_existing_v1()
+    test_llm_provider_env_vars()
+    test_llm_provider_explicit_overrides_env()
     test_provider_satisfies_protocol()
 
     print("\n=== Skill Loader ===")

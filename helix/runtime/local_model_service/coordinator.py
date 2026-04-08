@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from .adapter_discovery import discover_and_register, discover_and_register_builtins
 from .paths import _backend_cache_root, _worker_python
 from .model_specs import (
     model_spec_display_id,
@@ -26,17 +27,12 @@ from .preparer import ModelPreparationError, ensure_model_prepared, prepare_mode
 from .protocol import (
     _COORDINATOR_HEALTH_PATH,
     _DEFAULT_BACKEND_MODE,
-    _REAL_BACKEND_NAME,
     _STARTUP_TIMEOUT_SECONDS,
-    _SUPPORTED_BACKENDS,
-    _SUPPORTED_TASK_TYPES,
-    _canonical_task_type,
     _error_response,
     _http_json_request,
     _json_dumps,
     _request_timeout_seconds,
     _request_inputs,
-    _supported_backend_task,
 )
 
 
@@ -67,9 +63,11 @@ class _CoordinatorController:
         idle_seconds: int,
         backend_mode: str,
         runtime_dir: Path,
+        skills_root: str = "",
     ) -> None:
         self.cache_root = cache_root
         self.token = token
+        self.skills_root = str(skills_root or "").strip()
         self.idle_seconds = max(1, int(idle_seconds))
         self.backend_mode = backend_mode
         self.runtime_dir = runtime_dir
@@ -104,9 +102,9 @@ class _CoordinatorController:
             }
 
     def handle_request(self, *, payload: dict[str, Any]) -> dict[str, Any]:
-        if isinstance(payload.get("model_spec"), dict):
-            return self._handle_spec_request(payload=payload)
-        return self._handle_legacy_request(payload=payload)
+        if not isinstance(payload.get("model_spec"), dict):
+            raise ValueError("model_spec is required")
+        return self._handle_spec_request(payload=payload)
 
     def handle_prepare_request(self, *, payload: dict[str, Any]) -> dict[str, Any]:
         raw_spec = payload.get("model_spec")
@@ -163,75 +161,6 @@ class _CoordinatorController:
                 model_signature=model_signature,
                 model_spec=normalized,
                 model_root=model_root,
-            )
-            self._last_used_at = time.time()
-        return self._request_worker(worker, payload)
-
-    def _handle_legacy_request(self, *, payload: dict[str, Any]) -> dict[str, Any]:
-        raw_task_type = str(payload.get("task_type", "")).strip()
-        task_type = _canonical_task_type(raw_task_type)
-        if not task_type:
-            return _error_response(
-                task_type="",
-                backend="",
-                model_id="",
-                error_code="task_type_missing",
-                message="task_type is required",
-            )
-        if task_type not in _SUPPORTED_TASK_TYPES:
-            return _error_response(
-                task_type=task_type,
-                backend="",
-                model_id="",
-                error_code="task_type_unsupported",
-                message=f"unsupported task_type: {task_type}",
-            )
-        backend = str(payload.get("backend", "")).strip().lower()
-        if not backend:
-            return _error_response(
-                task_type=task_type,
-                backend="",
-                model_id="",
-                error_code="backend_missing",
-                message="backend is required",
-            )
-        if backend not in _SUPPORTED_BACKENDS:
-            return _error_response(
-                task_type=task_type,
-                backend=backend,
-                model_id="",
-                error_code="backend_unsupported",
-                message=f"unsupported backend: {backend}",
-            )
-        model_id = str(payload.get("model_id", "")).strip()
-        if not model_id:
-            return _error_response(
-                task_type=task_type,
-                backend=backend,
-                model_id="",
-                error_code="model_id_missing",
-                message="model_id is required",
-            )
-        if not _supported_backend_task(task_type, backend):
-            return _error_response(
-                task_type=task_type,
-                backend=backend,
-                model_id=model_id,
-                error_code="unsupported_backend_task",
-                message=f"unsupported backend/task combination: {backend}/{task_type}",
-            )
-        _request_inputs(payload)
-        payload = dict(payload)
-        payload["task_type"] = task_type
-        payload["request_timeout_seconds"] = _request_timeout_seconds(payload)
-        with self._lock:
-            worker = self._ensure_worker_locked(
-                task_type=task_type,
-                backend=backend,
-                model_id=model_id,
-                model_signature=model_id,
-                model_spec=None,
-                model_root=None,
             )
             self._last_used_at = time.time()
         return self._request_worker(worker, payload)
@@ -343,6 +272,8 @@ class _CoordinatorController:
             )
         if model_root is not None:
             cmd.extend(["--model-root", str(model_root)])
+        if self.skills_root:
+            cmd.extend(["--skills-root", self.skills_root])
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env.setdefault("HF_HOME", str(backend_cache_root / "models"))
@@ -586,6 +517,12 @@ class _CoordinatorHandler(BaseHTTPRequestHandler):
 
 
 def _coordinator_main(args) -> int:
+    # Register adapters from built-in and workspace skills
+    discover_and_register_builtins()
+    skills_root = str(getattr(args, "skills_root", "") or "").strip()
+    if skills_root:
+        discover_and_register(Path(skills_root))
+
     cache_root = Path(args.cache_root).expanduser().resolve()
     runtime_dir = Path(args.runtime_dir).expanduser().resolve()
     controller = _CoordinatorController(
@@ -594,6 +531,7 @@ def _coordinator_main(args) -> int:
         idle_seconds=int(args.idle_seconds),
         backend_mode=str(args.backend_mode),
         runtime_dir=runtime_dir,
+        skills_root=skills_root,
     )
     server = _CoordinatorHTTPServer((str(args.host), int(args.port)), _CoordinatorHandler, controller)
 

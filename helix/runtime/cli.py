@@ -1,12 +1,12 @@
 """CLI entrypoint for the agentic framework.
 
-Launches the RuntimeHost with provider, mode, model, and workspace
+Launches the RuntimeHost with LLM provider settings, mode, and workspace
 from command-line arguments.
 
 Usage::
 
     python -m helix.runtime.cli --workspace /path/to/workspace --session-id website-01
-    python -m helix.runtime.cli --provider deepseek --mode auto --workspace . --session-id news-site
+    python -m helix.runtime.cli --base-url https://api.deepseek.com/v1 --api-key $KEY --workspace . --session-id news-site
 """
 
 from __future__ import annotations
@@ -29,27 +29,34 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  %(prog)s --workspace . --session-id website-01\n"
-            "  %(prog)s --provider deepseek --model deepseek-chat --workspace ~/agent --session-id research-01\n"
-            "  %(prog)s --provider ollama --mode auto --workspace /tmp/sandbox --session-id sandbox-01\n"
+            "  %(prog)s --base-url https://api.deepseek.com/v1 --api-key $DEEPSEEK_API_KEY --workspace ~/agent --session-id research-01\n"
+            "  %(prog)s --model llama3.1:8b --mode auto --workspace /tmp/sandbox --session-id sandbox-01\n"
         ),
     )
 
-    # Core settings
+    # LLM provider settings
     parser.add_argument(
-        "--provider",
-        default="ollama",
-        help="LLM provider: ollama, deepseek, lmstudio, zai, openai_compatible (default: ollama)",
+        "--base-url",
+        default=None,
+        help="LLM API base URL (default: http://localhost:11434/v1 — Ollama). Env: LLM_BASE_URL",
     )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help="LLM API key (default: none). Env: LLM_API_KEY",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model name (default: llama3.1:8b). Env: LLM_MODEL",
+    )
+
+    # Runtime settings
     parser.add_argument(
         "--mode",
         default="controlled",
         choices=["auto", "controlled"],
         help="Execution mode: auto (no confirmation) or controlled (default: controlled)",
-    )
-    parser.add_argument(
-        "--model",
-        default=None,
-        help="Model name override (uses provider defaults if not specified)",
     )
     parser.add_argument(
         "--workspace",
@@ -134,9 +141,10 @@ def main(argv: list[str] = None) -> int:
     host = RuntimeHost(
         workspace=workspace,
         session_id=args.session_id,
-        provider=args.provider,
-        mode=args.mode,
+        base_url=args.base_url,
+        api_key=args.api_key,
         model=args.model,
+        mode=args.mode,
     )
     return host.start()
 

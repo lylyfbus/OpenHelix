@@ -1,31 +1,19 @@
 """Environment — the agent's sandbox (computer).
 
 Manages dual history (full_history + observation), sandbox execution,
-approval gates, state building with LLM-based compaction, and sub-agent delegation.
+approval gates, and state building with LLM-based compaction.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Callable, Optional, Union
 
 
 from .action import Action
-from .state import State, Turn, format_turn
-
-
-# --------------------------------------------------------------------------- #
-# Exceptions
-# --------------------------------------------------------------------------- #
-
-
-class CompactionError(RuntimeError):
-    """Raised when LLM-based context compaction fails after all retries.
-
-    The caller (run_loop) should catch this and return control to the
-    requester with a clear message.
-    """
+from .compactor import Compactor, CompactionError
+from .state import State, Turn
 
 
 class ExecutionInterrupted(RuntimeError):
@@ -48,39 +36,6 @@ SandboxExecutor = Callable[[dict, Path], Turn]
 
 
 # --------------------------------------------------------------------------- #
-# Compactor prompt
-# --------------------------------------------------------------------------- #
-
-COMPACTOR_PROMPT = "\n".join([
-    "You are an objective observer maintaining long-term memory for an agentic session.",
-    "Your task: merge the existing workflow_summary with the older workflow_history",
-    "turns into ONE updated workflow_summary.",
-    "",
-    "Input:",
-    "1) <workflow_summary>: existing long-term summary from previous compaction.",
-    "2) <workflow_history>: older turns being compacted (chronological).",
-    "",
-    "Update policy:",
-    "- Preserve durable key facts already in the summary.",
-    "- Update facts when new evidence changes them.",
-    "- Append newly confirmed key facts from the history turns.",
-    "- Never forget the user's original objective, constraints, or key decisions.",
-    "- Remove low-level execution detail, repetition, and speculation.",
-    "- Keep it compact but complete enough for long-horizon continuity.",
-    "",
-    "Required sections (use exactly these headers):",
-    "## Session Goal & Scope",
-    "## Key Decisions",
-    "## Progress & Milestones",
-    "## Current Status",
-    "## Open Loops & Next Actions",
-    "",
-    "Output: Return ONLY the updated summary text. No JSON wrapping, no tags.",
-    "Keep total length under 1500 characters.",
-])
-
-
-# --------------------------------------------------------------------------- #
 # Environment
 # --------------------------------------------------------------------------- #
 
@@ -93,7 +48,6 @@ class Environment:
         - State building with LLM-based context compaction.
         - Sandbox execution via pluggable executor.
         - Approval gates for exec actions.
-        - Sub-agent delegation.
         - Session persistence.
 
     Args:
@@ -112,6 +66,7 @@ class Environment:
         token_limit: int = int(100_000 * 0.75),
         keep_last_k: int = 10,
         executor: Optional[SandboxExecutor] = None,
+        compactor: Optional[Compactor] = None,
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -123,14 +78,13 @@ class Environment:
         # Pluggable executor
         self._executor = executor
 
+        # Pluggable compactor for LLM-based context compaction
+        self._compactor = compactor
+
         # Dual history
         self.full_history: list[Turn] = []
         self.observation: list[Turn] = []
         self.workflow_summary: str = ""
-
-        # Model reference for delegation and LLM-based compaction
-        self._model_ref: Any = None
-        self._loop_fn: Optional[Callable[..., str]] = None
 
         # Hooks
         self._on_before_execute: Optional[OnBeforeExecute] = None
@@ -149,10 +103,6 @@ class Environment:
         self.observation.append(turn)
 
     # ----- State building + compaction ------------------------------------- #
-
-    def set_loop_fn(self, loop_fn: Callable) -> None:
-        """Store the agent loop function for sub-agent delegation."""
-        self._loop_fn = loop_fn
 
     def build_state(self) -> State:
         """Build the State that the agent sees.
@@ -175,7 +125,11 @@ class Environment:
         recent = self.observation[split:]
 
         if old_part:
-            self.workflow_summary = self._compact(
+            if self._compactor is None:
+                raise CompactionError(
+                    "Context window exceeded but no compactor available."
+                )
+            self.workflow_summary = self._compactor.compact(
                 self.workflow_summary, old_part
             )
 
@@ -184,44 +138,6 @@ class Environment:
         return State(
             observation=list(self.observation),
             workflow_summary=self.workflow_summary,
-        )
-
-    def _compact(self, current_summary: str, old_turns: list[Turn]) -> str:
-        """Compact old turns into an updated workflow summary using the LLM.
-
-        Raises:
-            CompactionError: If no model is available or all retries fail.
-        """
-        if self._model_ref is None:
-            raise CompactionError(
-                "Context window exceeded but no model available for compaction."
-            )
-
-        # Build the compactor prompt
-        history_text = "\n".join(format_turn(t) for t in old_turns)
-        prompt = (
-            f"{COMPACTOR_PROMPT}\n\n"
-            f"<workflow_summary>\n"
-            f"{current_summary if current_summary else '(empty)'}\n"
-            f"</workflow_summary>\n\n"
-            f"<workflow_history>\n"
-            f"{history_text}\n"
-            f"</workflow_history>"
-        )
-
-        # Try LLM compaction with retry
-        last_error = ""
-        for attempt in range(3):
-            try:
-                result = self._model_ref.generate(prompt, stream=False)
-                if isinstance(result, str) and result.strip():
-                    return result.strip()
-                last_error = "LLM returned empty compaction result"
-            except Exception as exc:
-                last_error = str(exc)
-
-        raise CompactionError(
-            f"Context compaction failed after 3 retries: {last_error}"
         )
 
     # ----- Execution ------------------------------------------------------- #
@@ -253,69 +169,6 @@ class Environment:
             )
 
         return self._executor(action.payload, self.workspace)
-
-    # ----- Delegation ------------------------------------------------------ #
-
-    def delegate(self, action: Action) -> str:
-        """Spawn a sub-agent to handle a delegated task.
-
-        The sub-agent shares the parent workspace (for skills, knowledge,
-        and sandbox access) but runs in an isolated Environment with a
-        fresh history.
-
-        Returns:
-            The sub-agent's final report text.
-        """
-        task = action.payload
-
-        # Import here to avoid circular imports
-        from .agent import Agent
-        from .action import ALLOWED_SUB_ACTIONS
-
-        if self._loop_fn is None:
-            return "Delegation failed: no loop_fn set on Environment. Call set_loop_fn() first."
-
-        if self._model_ref is None:
-            return "Delegation failed: no model reference available. Call set_model_ref() first."
-
-        sub_env = Environment(
-            workspace=self.workspace,
-            mode=self.mode,
-            token_limit=self.token_limit,
-            keep_last_k=self.keep_last_k,
-            executor=self._executor,
-        )
-        # Propagate execution hook (sub-agents can't delegate)
-        sub_env._on_before_execute = self._on_before_execute
-        # Sub-agent gets model ref for its own compaction if needed
-        sub_env.set_model_ref(self._model_ref)
-
-        # Seed sub-agent with task objective (from core-agent)
-        role = task.get("role", "assistant")
-        objective = task.get("objective", "")
-        context = task.get("context", "")
-        seed_content = objective
-        if context:
-            seed_content += f"\n\nContext:\n{context}"
-        sub_env.record(Turn(role="core-agent", content=seed_content))
-
-        # Build sub-agent using the same prompt pipeline as core-agent,
-        # but loading the "sub_agent" template instead of "core_agent".
-        sub_agent = Agent(
-            self._model_ref,
-            name="sub-agent",
-            workspace=self.workspace,
-            role="sub_agent",
-            sub_agent_role=role,
-            allowed_actions=ALLOWED_SUB_ACTIONS,
-        )
-
-        sub_agent.act = getattr(sub_agent, "act")  # appease typechecker
-        return self._loop_fn(sub_agent, sub_env)
-
-    def set_model_ref(self, model: Any) -> None:
-        """Store a reference to the model provider for delegation and compaction."""
-        self._model_ref = model
 
     # ----- Persistence ----------------------------------------------------- #
 

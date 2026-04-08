@@ -1,4 +1,4 @@
-"""Spec-driven PyTorch Qwen custom-voice TTS backend."""
+"""Host adapter for the generate-audio skill (Qwen custom-voice TTS)."""
 
 from __future__ import annotations
 
@@ -8,13 +8,26 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..base import _BaseBackend
-from ...paths import _PYTORCH_TEXT_TO_AUDIO_DEPENDENCIES, _ensure_worker_dependencies
-from ...protocol import (
+from helix.runtime.local_model_service.registry import _BaseBackend
+from helix.runtime.local_model_service.paths import _ensure_worker_dependencies
+from helix.runtime.local_model_service.protocol import (
     _DEFAULT_AUDIO_SAMPLE_RATE,
     _request_inputs,
     _resolve_service_workspace_root,
     _resolve_workspace_path,
+)
+
+FAMILY = "pytorch.qwen_tts_custom_voice"
+BACKEND = "pytorch"
+TASK_TYPES = ["text_to_audio"]
+
+_PYTORCH_TEXT_TO_AUDIO_DEPENDENCIES = (
+    "huggingface_hub",
+    "numpy",
+    "qwen-tts",
+    "soundfile",
+    "torch",
+    "transformers",
 )
 
 
@@ -142,3 +155,14 @@ class _SpecQwenTTSCustomVoiceBackend(_BaseBackend):
             message=f"generated audio at {rel}",
         )
 
+
+def create_adapter(*, task_type, backend, model_id, cache_root, python_bin, model_spec, model_root):
+    return _SpecQwenTTSCustomVoiceBackend(
+        task_type=task_type,
+        backend=backend,
+        model_id=model_id,
+        model_spec=model_spec,
+        model_root=model_root,
+        cache_root=cache_root,
+        python_bin=python_bin,
+    )

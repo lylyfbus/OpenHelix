@@ -23,8 +23,8 @@ from helix.core.action import Action, ALLOWED_CORE_ACTIONS, ALLOWED_SUB_ACTIONS
 from helix.core.agent import Agent
 from helix.core.environment import Environment
 from helix.core.state import Turn, format_turn
-from helix.core.sandbox import sandbox_executor
-from helix.runtime.loop import run_loop
+from helix.runtime.sandbox import sandbox_executor
+from helix.runtime.loop import run_loop, _delegate
 from helix.runtime.approval import ApprovalPolicy
 
 
@@ -231,8 +231,6 @@ def run_simulation_scenario_1():
         )
         policy = ApprovalPolicy(mode="auto")
         env.on_before_execute(policy)
-        env.set_model_ref(sub_model)  # Sub-agent will use this model
-        env.set_loop_fn(run_loop)
 
         # Record user request
         env.record(Turn(role="user", content="What Python version is installed?"))
@@ -243,9 +241,9 @@ def run_simulation_scenario_1():
             system_prompt="You are the core agent. Manage tasks and delegate when needed.",
         )
 
-        # Run the loop
+        # Run the loop — pass sub_model for delegation
         output = StringIO()
-        result = run_loop(core_agent, env, output=output)
+        result = run_loop(core_agent, env, model=sub_model, output=output)
 
         # ---- Inspect core-agent observations ----
         print("CORE-AGENT OBSERVATIONS:")
@@ -295,7 +293,7 @@ def run_simulation_scenario_1():
                         rel = item.relative_to(child)
                         print(f"    {rel} ({item.stat().st_size} bytes)")
         else:
-            print("\n⚠️  WARNING: No sub_agents directory created!")
+            print("\n  No sub_agents directory created (expected — sub-agent shares parent workspace)")
 
         # ---- Session persistence ----
         session_path = workspace / "session_test.json"
@@ -316,12 +314,12 @@ def run_simulation_scenario_1():
         assert len(env2.full_history) == len(env.full_history), "History mismatch after reload"
         sub_turns_reloaded = [t for t in env2.full_history if t.role == "sub-agent"]
         assert len(sub_turns_reloaded) == len(sub_turns), "Sub-agent turns lost on reload"
-        print("  ✅ Session reload verified — all turns preserved")
+        print("  Session reload verified — all turns preserved")
 
         # ---- Verify communication records in detail ----
         print("\n  Communication record verification:")
         roles_sequence = [t.role for t in env.full_history]
-        print(f"  Turn sequence: {' → '.join(roles_sequence)}")
+        print(f"  Turn sequence: {' -> '.join(roles_sequence)}")
 
         # Expected: user → core-agent(think) → core-agent(delegate) → sub-agent → core-agent(chat)
         assert "user" in roles_sequence, "Missing user turn"
@@ -329,7 +327,7 @@ def run_simulation_scenario_1():
         assert "sub-agent" in roles_sequence, "Missing sub-agent turn"
 
         print(f"\n  Final result: {result[:100]}...")
-        print("\n✅ Scenario 1 PASSED")
+        print("\n  Scenario 1 PASSED")
 
 
 def run_simulation_scenario_2():
@@ -351,8 +349,6 @@ def run_simulation_scenario_2():
         )
         policy = ApprovalPolicy(mode="auto")
         env.on_before_execute(policy)
-        env.set_model_ref(model)
-        env.set_loop_fn(run_loop)
 
         env.record(Turn(role="user", content="Gather system information for me."))
 
@@ -362,7 +358,7 @@ def run_simulation_scenario_2():
         )
 
         output = StringIO()
-        result = run_loop(agent, env, output=output)
+        result = run_loop(agent, env, model=model, output=output)
 
         # Inspect all model calls
         print("ALL MODEL CALLS (chronological):")
@@ -385,11 +381,11 @@ def run_simulation_scenario_2():
 
         print(f"\nSession saved: {len(raw['full_history'])} turns")
         for i, turn in enumerate(raw["full_history"]):
-            content_preview = turn["content"][:80].replace("\n", "↵")
+            content_preview = turn["content"][:80].replace("\n", " ")
             print(f"  [{i}] {turn['role']:>12} | {content_preview}...")
 
         print(f"\n  Final result: {result[:100]}...")
-        print("\n✅ Scenario 2 PASSED")
+        print("\n  Scenario 2 PASSED")
 
 
 def run_simulation_scenario_3():
@@ -421,15 +417,14 @@ def run_simulation_scenario_3():
     except ActionParseError as exc:
         print(f"  Parse correctly rejected delegate: {exc}")
 
-    print("\n✅ Scenario 3 PASSED")
+    print("\n  Scenario 3 PASSED")
 
 
 def run_simulation_scenario_4():
     """Scenario 4: Delegation failure modes.
 
     Tests:
-    - Missing model ref
-    - Missing loop_fn
+    - Missing model (no model passed to _delegate)
     """
     print(_separator("Scenario 4: Delegation Failure Modes"))
 
@@ -441,21 +436,13 @@ def run_simulation_scenario_4():
             payload={"role": "test", "objective": "test task"},
         )
 
-        # No model ref
-        env1 = Environment(workspace=workspace / "test1")
-        env1.set_loop_fn(run_loop)
-        result1 = env1.delegate(action)
-        assert "no model reference" in result1.lower()
-        print(f"  No model ref: {result1}")
+        # No model
+        env = Environment(workspace=workspace / "test1")
+        result = _delegate(action, env, model=None)
+        assert "no model reference" in result.lower()
+        print(f"  No model: {result}")
 
-        # No loop fn
-        env2 = Environment(workspace=workspace / "test2")
-        env2.set_model_ref(InstrumentedSubModel())
-        result2 = env2.delegate(action)
-        assert "no loop_fn" in result2.lower()
-        print(f"  No loop fn:   {result2}")
-
-    print("\n✅ Scenario 4 PASSED")
+    print("\n  Scenario 4 PASSED")
 
 
 def run_simulation_scenario_5():
@@ -478,8 +465,6 @@ def run_simulation_scenario_5():
         )
         policy = ApprovalPolicy(mode="auto")
         env.on_before_execute(policy)
-        env.set_model_ref(sub_model)
-        env.set_loop_fn(run_loop)
 
         env.record(Turn(role="user", content="Check the Python version."))
 
@@ -489,26 +474,26 @@ def run_simulation_scenario_5():
         )
 
         output = StringIO()
-        run_loop(agent, env, output=output)
+        run_loop(agent, env, model=sub_model, output=output)
 
         # Detailed breakdown of what each agent saw
-        print("CORE-AGENT — Prompt #1 (before think):")
+        print("CORE-AGENT - Prompt #1 (before think):")
         p1 = core_model.prompts_received[0]
         _print_prompt_sections(p1)
 
-        print("\nCORE-AGENT — Prompt #2 (before delegate):")
+        print("\nCORE-AGENT - Prompt #2 (before delegate):")
         p2 = core_model.prompts_received[1]
         _print_prompt_sections(p2)
 
-        print("\nCORE-AGENT — Prompt #3 (after sub-agent returned):")
+        print("\nCORE-AGENT - Prompt #3 (after sub-agent returned):")
         p3 = core_model.prompts_received[2]
         _print_prompt_sections(p3)
 
-        print("\nSUB-AGENT — Prompt #1 (initial task):")
+        print("\nSUB-AGENT - Prompt #1 (initial task):")
         sp1 = sub_model.prompts_received[0]
         _print_prompt_sections(sp1)
 
-        print("\nSUB-AGENT — Prompt #2 (after exec result):")
+        print("\nSUB-AGENT - Prompt #2 (after exec result):")
         sp2 = sub_model.prompts_received[1]
         _print_prompt_sections(sp2)
 
@@ -516,7 +501,7 @@ def run_simulation_scenario_5():
         assert "sub-agent" in p3.lower() or "sub_agent" in p3.lower(), \
             "Core-agent prompt #3 should contain sub-agent result"
 
-        print("\n✅ Scenario 5 PASSED")
+        print("\n  Scenario 5 PASSED")
 
 
 def _print_prompt_sections(prompt: str):
@@ -548,7 +533,7 @@ def _print_prompt_sections(prompt: str):
 if __name__ == "__main__":
     print("=" * 72)
     print("  SUB-AGENT DELEGATION SIMULATION")
-    print("  Testing core-agent ↔ sub-agent communication flows")
+    print("  Testing core-agent <-> sub-agent communication flows")
     print("=" * 72)
 
     run_simulation_scenario_1()
@@ -558,5 +543,5 @@ if __name__ == "__main__":
     run_simulation_scenario_5()
 
     print("\n" + "=" * 72)
-    print("  🎉 ALL SIMULATION SCENARIOS PASSED!")
+    print("  ALL SIMULATION SCENARIOS PASSED!")
     print("=" * 72)

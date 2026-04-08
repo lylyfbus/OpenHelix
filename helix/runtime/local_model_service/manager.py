@@ -88,6 +88,8 @@ class LocalModelServiceManager:
                 self.backend_mode,
                 "--runtime-dir",
                 str(self.runtime_dir),
+                "--skills-root",
+                str(self.workspace / "skills"),
             ]
             process = subprocess.Popen(
                 cmd,

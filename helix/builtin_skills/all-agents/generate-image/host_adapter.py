@@ -1,25 +1,71 @@
-"""Spec-driven MLX Z-Image backend."""
+"""Host adapter for the generate-image skill (MLX Z-Image)."""
 
 from __future__ import annotations
 
 import contextlib
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any
 
-from ..base import _BaseBackend
-from ...paths import (
-    _MLX_GENERATION_DEPENDENCIES,
-    _ensure_mlx_runner_sources,
-    _ensure_worker_dependencies,
-)
-from ...protocol import (
+from helix.runtime.local_model_service.registry import _BaseBackend
+from helix.runtime.local_model_service.paths import _ensure_worker_dependencies
+from helix.runtime.local_model_service.protocol import (
+    _HTTP_TIMEOUT_SECONDS,
     _parse_int,
     _parse_size,
     _request_inputs,
     _resolve_service_workspace_root,
     _resolve_workspace_path,
 )
+
+FAMILY = "mlx.z_image"
+BACKEND = "mlx"
+TASK_TYPES = ["text_to_image"]
+
+_MLX_GENERATION_DEPENDENCIES = (
+    "accelerate",
+    "diffusers>=0.35.0",
+    "hf_transfer",
+    "huggingface_hub",
+    "mlx>=0.20.0",
+    "numpy",
+    "pillow",
+    "safetensors",
+    "torch",
+    "transformers",
+    "tqdm",
+)
+_MLX_Z_IMAGE_COMMIT = "b508c3555cd49b5fb5afd3434053a55d1710c129"
+_MLX_Z_IMAGE_FILES = (
+    "lora_utils.py",
+    "mlx_pipeline.py",
+    "mlx_text_encoder.py",
+    "mlx_z_image.py",
+)
+
+
+def _download_public_file(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req, timeout=max(_HTTP_TIMEOUT_SECONDS, 60)) as resp:
+        data = resp.read()
+    dest.write_bytes(data)
+
+
+def _ensure_mlx_runner_sources(cache_root: Path) -> Path:
+    runner_root = cache_root / "sources" / f"mlx_z_image-{_MLX_Z_IMAGE_COMMIT}"
+    runner_root.mkdir(parents=True, exist_ok=True)
+    for filename in _MLX_Z_IMAGE_FILES:
+        target = runner_root / filename
+        if target.exists():
+            continue
+        url = (
+            "https://raw.githubusercontent.com/uqer1244/MLX_z-image/"
+            f"{_MLX_Z_IMAGE_COMMIT}/{filename}"
+        )
+        _download_public_file(url, target)
+    return runner_root
 
 
 class _SpecMLXZImageBackend(_BaseBackend):
@@ -101,3 +147,14 @@ class _SpecMLXZImageBackend(_BaseBackend):
         rel = str(output_path.relative_to(workspace_root))
         return self._ok(outputs={"output_path": rel}, message=f"generated image at {rel}")
 
+
+def create_adapter(*, task_type, backend, model_id, cache_root, python_bin, model_spec, model_root):
+    return _SpecMLXZImageBackend(
+        task_type=task_type,
+        backend=backend,
+        model_id=model_id,
+        model_spec=model_spec,
+        model_root=model_root,
+        cache_root=cache_root,
+        python_bin=python_bin,
+    )

@@ -26,7 +26,7 @@ from helix.core.environment import Environment
 from helix.core.agent import Agent
 from helix.core.state import Turn
 from helix.runtime.loop import run_loop
-from helix.core.sandbox import docker_is_available, sandbox_executor
+from helix.runtime.sandbox import docker_is_available, sandbox_executor
 from helix.runtime.approval import ApprovalPolicy
 from helix.runtime.host import RuntimeHost
 

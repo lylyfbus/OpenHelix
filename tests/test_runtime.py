@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helix.core.action import Action
 from helix.core.environment import Environment
-from helix.core.sandbox import docker_is_available, sandbox_executor
+from helix.runtime.sandbox import docker_is_available, sandbox_executor
 from helix.core.state import Turn
 from helix.runtime.approval import ApprovalPolicy
 from helix.runtime.display import TURN_SEPARATOR

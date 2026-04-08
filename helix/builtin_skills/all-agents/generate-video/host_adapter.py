@@ -1,4 +1,4 @@
-"""Spec-driven PyTorch video backends."""
+"""Host adapter for the generate-video skill (LTX and Wan video families)."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-from ..base import _BaseBackend
-from ...paths import _PYTORCH_VIDEO_DEPENDENCIES, _ensure_worker_dependencies
-from ...protocol import (
+from helix.runtime.local_model_service.registry import _BaseBackend
+from helix.runtime.local_model_service.paths import _ensure_worker_dependencies
+from helix.runtime.local_model_service.protocol import (
     _parse_float,
     _parse_int,
     _parse_size,
@@ -16,6 +16,33 @@ from ...protocol import (
     _resolve_service_workspace_root,
     _resolve_workspace_path,
 )
+
+FAMILY = "pytorch.diffusers_ltx_video"
+BACKEND = "pytorch"
+TASK_TYPES = ["text_to_video", "text_image_to_video"]
+
+_PYTORCH_VIDEO_DEPENDENCIES = (
+    "accelerate",
+    "git+https://github.com/huggingface/diffusers",
+    "huggingface_hub",
+    "imageio",
+    "imageio-ffmpeg",
+    "numpy",
+    "pillow",
+    "protobuf",
+    "safetensors",
+    "sentencepiece",
+    "torch",
+    "transformers",
+)
+
+
+def _ensure_ltx_tokenizer_dependencies(python_bin: Path) -> None:
+    try:
+        import sentencepiece  # noqa: F401
+        import google.protobuf  # noqa: F401
+    except ImportError:
+        _ensure_worker_dependencies(python_bin, ("sentencepiece", "protobuf"))
 
 
 class _SpecPyTorchVideoBackend(_BaseBackend):
@@ -170,6 +197,8 @@ class _SpecLTXVideoBackend(_SpecPyTorchVideoBackend):
     def _load_pipeline(self, torch, dtype):
         assert self.model_root is not None
         assert self.model_spec is not None
+        assert self.python_bin is not None
+        _ensure_ltx_tokenizer_dependencies(self.python_bin)
         from diffusers import AutoencoderKLLTXVideo, LTXImageToVideoPipeline, LTXPipeline
         from transformers import T5EncoderModel, T5TokenizerFast
 
@@ -244,3 +273,33 @@ class _SpecWanVideoBackend(_SpecPyTorchVideoBackend):
                 torch_dtype=torch.float32,
             )
             return WanPipeline.from_pretrained(str(self.model_root), vae=vae, torch_dtype=dtype)
+
+
+def create_adapter(*, task_type, backend, model_id, cache_root, python_bin, model_spec, model_root):
+    return _SpecLTXVideoBackend(
+        task_type=task_type,
+        backend=backend,
+        model_id=model_id,
+        model_spec=model_spec,
+        model_root=model_root,
+        cache_root=cache_root,
+        python_bin=python_bin,
+    )
+
+
+# Second family: Wan Video (same skill, different model architecture)
+FAMILY_WAN = "pytorch.diffusers_wan_video"
+BACKEND_WAN = "pytorch"
+TASK_TYPES_WAN = ["text_to_video", "text_image_to_video"]
+
+
+def create_wan_adapter(*, task_type, backend, model_id, cache_root, python_bin, model_spec, model_root):
+    return _SpecWanVideoBackend(
+        task_type=task_type,
+        backend=backend,
+        model_id=model_id,
+        model_spec=model_spec,
+        model_root=model_root,
+        cache_root=cache_root,
+        python_bin=python_bin,
+    )

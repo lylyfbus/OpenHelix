@@ -1,7 +1,7 @@
 """Sub-agent delegation integration tests.
 
-Tests the delegate action flow: core-agent emits delegate → Environment
-spawns sub-agent with isolated workspace → sub-agent runs → result
+Tests the delegate action flow: core-agent emits delegate → run_loop
+spawns sub-agent with isolated environment → sub-agent runs → result
 flows back into parent history.
 """
 
@@ -15,9 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from helix.core.action import Action, ALLOWED_CORE_ACTIONS, ALLOWED_SUB_ACTIONS
 from helix.core.agent import Agent
 from helix.core.environment import Environment
-from helix.runtime.loop import run_loop
+from helix.runtime.loop import run_loop, _delegate
 from helix.core.state import Turn
-from helix.core.sandbox import docker_is_available, sandbox_executor
+from helix.runtime.sandbox import docker_is_available, sandbox_executor
 from helix.runtime.approval import ApprovalPolicy
 from helix.runtime.display import TURN_SEPARATOR
 
@@ -128,23 +128,18 @@ class SharedModel:
 # =========================================================================== #
 
 
-def test_delegate_no_model_ref():
-    """Delegation should fail gracefully if no model reference is set."""
+def test_delegate_no_model():
+    """Delegation should fail gracefully if no model is provided."""
     with tempfile.TemporaryDirectory() as td:
         env = Environment(workspace=Path(td))
-        env.set_loop_fn(run_loop)
-        # Don't set model ref
         action = Action(
             response="Delegating...",
             type="delegate",
             payload={"role": "test", "objective": "test task"},
         )
-        result = env.delegate(action)
+        result = _delegate(action, env, model=None)
         assert "no model reference" in result.lower()
-        print("  Delegate without model ref OK")
-
-
-
+        print("  Delegate without model OK")
 
 
 def test_delegate_basic():
@@ -152,8 +147,6 @@ def test_delegate_basic():
     with tempfile.TemporaryDirectory() as td:
         env = Environment(workspace=Path(td), mode="auto")
         model = SubAgentModel()
-        env.set_model_ref(model)
-        env.set_loop_fn(run_loop)
 
         action = Action(
             response="Delegating...",
@@ -164,7 +157,7 @@ def test_delegate_basic():
                 "context": "Math question",
             },
         )
-        result = env.delegate(action)
+        result = _delegate(action, env, model=model)
 
         # Sub-agent should have chatted back
         assert "chat" in result.lower() or len(result) > 0
@@ -183,15 +176,13 @@ def test_delegate_shares_parent_workspace():
         env = Environment(workspace=workspace, mode="auto", executor=sandbox_executor)
         policy = ApprovalPolicy(mode="auto")
         env.on_before_execute(policy)
-        env.set_model_ref(SubAgentModel())
-        env.set_loop_fn(run_loop)
 
         action = Action(
             response="Delegating...",
             type="delegate",
             payload={"role": "researcher", "objective": "test workspace sharing"},
         )
-        env.delegate(action)
+        _delegate(action, env, model=SubAgentModel())
 
         # No sub_agents directory should be created
         assert not (workspace / "sub_agents").exists()
@@ -212,8 +203,6 @@ def test_full_delegation_loop():
         model = SharedModel()
 
         env = Environment(workspace=workspace, mode="auto")
-        env.set_model_ref(model)
-        env.set_loop_fn(run_loop)
         env.record(Turn(role="user", content="Who created Python?"))
 
         agent = Agent(
@@ -222,7 +211,7 @@ def test_full_delegation_loop():
         )
 
         output = StringIO()
-        result = run_loop(agent, env, output=output)
+        result = run_loop(agent, env, model=model, output=output)
 
         # Should get the final answer
         assert "Guido" in result
@@ -277,15 +266,13 @@ def test_delegate_with_exec_in_sub_agent():
         )
         policy = ApprovalPolicy(mode="auto")
         env.on_before_execute(policy)
-        env.set_model_ref(model)
-        env.set_loop_fn(run_loop)
 
         action = Action(
             response="Delegating with exec...",
             type="delegate",
             payload={"role": "executor", "objective": "Run a test script"},
         )
-        result = env.delegate(action)
+        result = _delegate(action, env, model=model)
 
         assert "sub-agent-output" in result
         assert model.count == 2
@@ -299,7 +286,7 @@ def test_delegate_with_exec_in_sub_agent():
 
 if __name__ == "__main__":
     print("=== Delegation Guards ===")
-    test_delegate_no_model_ref()
+    test_delegate_no_model()
     test_delegate_sub_agent_cannot_delegate()
 
     print("\n=== Basic Delegation ===")

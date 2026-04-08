@@ -1,15 +1,18 @@
-"""OpenAI-compatible model provider — /chat/completions adapter.
+"""Universal LLM provider — OpenAI-compatible /v1/chat/completions adapter.
 
-Supports any provider speaking the OpenAI chat completions API:
-DeepSeek, LM Studio, Z.AI, vLLM, Together, etc.
+Works with any server that speaks the OpenAI chat completions API:
+Ollama, vLLM, LM Studio, DeepSeek, Together, OpenRouter, etc.
 
-Satisfies the ``ModelProvider`` protocol defined in ``core/agent.py``.
+Environment variables:
+    LLM_BASE_URL: Base URL (default: http://localhost:11434/v1 — Ollama)
+    LLM_API_KEY: API key (default: empty — no auth)
+    LLM_MODEL: Model name (default: llama3.1:8b)
+    LLM_TIMEOUT_SECONDS: Request timeout (default: 300)
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 import socket
 import ssl
@@ -20,85 +23,50 @@ from urllib.request import Request, urlopen
 
 from ._http import post_json as _post_json, to_runtime_error as _to_runtime_error
 
+_DEFAULT_BASE_URL = "http://localhost:11434/v1"
+_DEFAULT_MODEL = "llama3.1:8b"
+_DEFAULT_TIMEOUT = 300
 
-class OpenAICompatProvider:
-    """OpenAI-compatible ``/chat/completions`` adapter with SSE streaming.
 
-    Environment variables (fallback chain):
-        OPENAI_COMPAT_BASE_URL / provider-specific URL env
-        OPENAI_COMPAT_API_KEY / provider-specific key env
-        OPENAI_COMPAT_MODEL / provider-specific model env
-        OPENAI_COMPAT_TIMEOUT_SECONDS (default: 300)
+class LLMProvider:
+    """Universal LLM provider using ``/v1/chat/completions``.
+
+    Satisfies the ``ModelProvider`` protocol.
     """
-
-    # Pre-defined provider presets
-    PRESETS: dict[str, dict[str, str]] = {
-        "deepseek": {
-            "base_url_env": "DEEPSEEK_BASE_URL",
-            "api_key_env": "DEEPSEEK_API_KEY",
-            "model_env": "DEEPSEEK_MODEL",
-            "default_base_url": "https://api.deepseek.com",
-            "default_model": "deepseek-chat",
-        },
-        "lmstudio": {
-            "base_url_env": "LMSTUDIO_BASE_URL",
-            "api_key_env": "LMSTUDIO_API_KEY",
-            "model_env": "LMSTUDIO_MODEL",
-            "default_base_url": "http://localhost:1234/v1",
-            "default_model": "local-model",
-        },
-        "zai": {
-            "base_url_env": "ZAI_BASE_URL",
-            "api_key_env": "ZAI_API_KEY",
-            "model_env": "ZAI_MODEL",
-            "default_base_url": "https://api.z.ai/api/paas/v4",
-            "default_model": "glm-5",
-        },
-    }
-    REQUIRED_API_KEY_PROVIDERS = {"deepseek", "zai"}
 
     def __init__(
         self,
         *,
-        provider: str = "openai_compatible",
-        model: Optional[str] = None,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        model: Optional[str] = None,
         timeout: Optional[int] = None,
         temperature: float = 0.2,
     ) -> None:
-        preset = self.PRESETS.get(provider.lower(), {})
+        import os
 
-        # Resolve base URL
         raw_base = (
             base_url
-            or os.getenv(preset.get("base_url_env", ""), "").strip()
-            or os.getenv("OPENAI_COMPAT_BASE_URL", "").strip()
-            or preset.get("default_base_url", "http://localhost:1234/v1")
+            or os.getenv("LLM_BASE_URL", "").strip()
+            or _DEFAULT_BASE_URL
         ).rstrip("/")
         if not re.search(r"/v\d+$", raw_base):
             raw_base = f"{raw_base}/v1"
         self.endpoint = f"{raw_base}/chat/completions"
+        self.base_url = raw_base
 
-        # Resolve model
         self.model = (
             model
-            or os.getenv(preset.get("model_env", ""), "").strip()
-            or os.getenv("OPENAI_COMPAT_MODEL", "").strip()
-            or preset.get("default_model", "local-model")
+            or os.getenv("LLM_MODEL", "").strip()
+            or _DEFAULT_MODEL
         )
-
-        # Resolve API key
         self.api_key = (
             api_key
-            or os.getenv(preset.get("api_key_env", ""), "").strip()
-            or os.getenv("OPENAI_COMPAT_API_KEY", "").strip()
+            or os.getenv("LLM_API_KEY", "").strip()
             or ""
         )
-
-        self.timeout = timeout or int(os.getenv("OPENAI_COMPAT_TIMEOUT_SECONDS", "300"))
+        self.timeout = timeout or int(os.getenv("LLM_TIMEOUT_SECONDS", str(_DEFAULT_TIMEOUT)))
         self.temperature = temperature
-        self.provider = provider
 
     def generate(
         self,
@@ -108,8 +76,6 @@ class OpenAICompatProvider:
         chunk_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         """Generate text via chat completions; optionally stream via SSE."""
-        self._validate_configuration()
-
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -126,7 +92,7 @@ class OpenAICompatProvider:
                 headers,
                 payload,
                 timeout=self.timeout,
-                error_prefix=self.provider,
+                error_prefix="LLM",
             )
             return _extract_response_text(data)
 
@@ -167,22 +133,7 @@ class OpenAICompatProvider:
             RemoteDisconnected,
             ssl.SSLError,
         ) as exc:
-            raise _to_runtime_error(self.provider, exc) from exc
-
-    def _validate_configuration(self) -> None:
-        """Fail fast for providers that require an API key."""
-        provider_name = self.provider.strip().lower()
-        if provider_name not in self.REQUIRED_API_KEY_PROVIDERS:
-            return
-        if self.api_key:
-            return
-
-        preset = self.PRESETS.get(provider_name, {})
-        provider_key_env = preset.get("api_key_env", "API_KEY")
-        raise RuntimeError(
-            f"Missing API key for provider '{provider_name}'. "
-            f"Set {provider_key_env} or OPENAI_COMPAT_API_KEY."
-        )
+            raise _to_runtime_error("LLM", exc) from exc
 
 
 # --------------------------------------------------------------------------- #

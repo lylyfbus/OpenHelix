@@ -18,6 +18,7 @@ from helix.core.action import (
     ALLOWED_SUB_ACTIONS,
 )
 from helix.core.agent import Agent
+from helix.core.compactor import Compactor
 from helix.core.environment import Environment
 from helix.runtime.display import TURN_SEPARATOR
 from helix.runtime.loop import run_loop
@@ -195,8 +196,8 @@ def test_environment_compaction():
             return "## Session Goal\nTest session\n## Current Status\nCompacted."
 
     with tempfile.TemporaryDirectory() as td:
-        env = Environment(workspace=Path(td), token_limit=200, keep_last_k=2)
-        env.set_model_ref(CompactorModel())
+        env = Environment(workspace=Path(td), token_limit=200, keep_last_k=2,
+                          compactor=Compactor(CompactorModel()))
         # Add many turns to exceed budget
         for i in range(20):
             env.record(Turn(role="agent", content=f"Turn {i} " + "x" * 100))
@@ -228,12 +229,12 @@ def test_agent_prompt_keeps_summary_separate_from_recent_history():
 
 
 def test_environment_compaction_error():
-    """Compaction raises CompactionError when no model is available."""
-    from helix.core.environment import CompactionError
+    """Compaction raises CompactionError when no compactor is available."""
+    from helix.core.compactor import CompactionError
 
     with tempfile.TemporaryDirectory() as td:
         env = Environment(workspace=Path(td), token_limit=200, keep_last_k=2)
-        # No model ref set — compaction should fail
+        # No compactor set — compaction should fail
         for i in range(20):
             env.record(Turn(role="agent", content=f"Turn {i} " + "x" * 100))
         try:
@@ -280,19 +281,18 @@ def test_run_loop_compaction_failure_is_ui_only():
             assert False, "Agent model should not be called when compaction fails"
 
     with tempfile.TemporaryDirectory() as td:
-        env = Environment(workspace=Path(td), token_limit=10, keep_last_k=1)
+        compactor_model = FailingCompactionModel()
+        env = Environment(workspace=Path(td), token_limit=10, keep_last_k=1,
+                          compactor=Compactor(compactor_model))
         env.record(Turn(role="user", content="x" * 120))
         env.record(Turn(role="runtime", content="y" * 120))
-
-        compactor = FailingCompactionModel()
-        env.set_model_ref(compactor)
 
         agent = Agent(UnusedAgentModel(), system_prompt="test")
         captured = StringIO()
         result = run_loop(agent, env, output=captured)
 
         assert "compaction failed" in result.lower()
-        assert compactor.calls == 3
+        assert compactor_model.calls == 3
         assert f"{TURN_SEPARATOR}\nruntime> Session paused:" in captured.getvalue()
         assert TURN_SEPARATOR in captured.getvalue()
         assert len(env.full_history) == 2

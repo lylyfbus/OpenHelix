@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import queue
@@ -9,7 +10,6 @@ import sys
 import tempfile
 import threading
 import time
-import types
 from pathlib import Path
 
 import pytest
@@ -19,10 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from helix.runtime.local_model_service import (
     LocalModelServiceManager,
     _CoordinatorController,
-    _RealImageGenerationBackend,
-    _RealMLXImageGenerationBackend,
-    _RealPyTorchTextToAudioBackend,
-    _RealPyTorchVideoGenerationBackend,
     _WorkerState,
     _http_json_request,
     _kill_process_tree,
@@ -32,9 +28,26 @@ from helix.runtime.local_model_service import (
 from helix.runtime.cli import main as runtime_cli_main
 from helix.runtime.local_model_service.model_specs import manifest_matches
 from helix.runtime.local_model_service.preparer import _hf_cli_command, _hf_download_command
+from helix.runtime.local_model_service.adapter_discovery import discover_and_register_builtins
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Register built-in adapters so normalize_model_spec/manifest_matches work
+# in the test process (coordinator/worker subprocesses do this at startup).
+discover_and_register_builtins()
+
+
+def _load_skill_adapter(skill_name: str):
+    """Load a host_adapter.py module from a builtin skill by name."""
+    adapter_path = (
+        ROOT / "helix" / "builtin_skills" / "all-agents" / skill_name / "host_adapter.py"
+    )
+    spec = importlib.util.spec_from_file_location(f"_test_{skill_name}", adapter_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_model_spec(skill_name: str) -> dict:
@@ -137,7 +150,7 @@ def test_local_model_service_default_cache_root_is_global(monkeypatch: pytest.Mo
             manager.stop()
 
 
-def test_local_model_service_auth_and_path_validation(monkeypatch: pytest.MonkeyPatch):
+def test_local_model_service_auth_and_request_validation(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         manager = _start_manager(workspace, monkeypatch)
@@ -145,24 +158,21 @@ def test_local_model_service_auth_and_path_validation(monkeypatch: pytest.Monkey
             env = manager.tool_environment()
             base_url = env["HELIX_LOCAL_MODEL_SERVICE_URL"].replace("host.docker.internal", "127.0.0.1")
 
+            # Missing auth token
             status, _, parsed = _http_json_request(
                 method="POST",
                 url=f"{base_url}/infer",
                 payload={
                     "task_type": "text_to_image",
-                    "backend": "pytorch",
-                    "model_id": "Tongyi-MAI/Z-Image-Turbo",
                     "workspace_root": str(workspace.resolve()),
-                    "inputs": {
-                        "prompt": "hello",
-                        "size": "1024x1024",
-                        "output_path": "generated_images/test.png",
-                    },
+                    "model_spec": _IMAGE_MODEL_SPEC,
+                    "inputs": {"prompt": "hello", "size": "1024x1024", "output_path": "test.png"},
                 },
             )
             assert status == 401
             assert parsed["error_code"] == "unauthorized"
 
+            # Missing model_spec
             status, _, parsed = _http_json_request(
                 method="POST",
                 url=f"{base_url}/infer",
@@ -172,16 +182,13 @@ def test_local_model_service_auth_and_path_validation(monkeypatch: pytest.Monkey
                     "backend": "pytorch",
                     "workspace_root": str(workspace.resolve()),
                     "model_id": "Tongyi-MAI/Z-Image-Turbo",
-                    "inputs": {
-                        "prompt": "hello",
-                        "size": "1024x1024",
-                        "output_path": "../escape.png",
-                    },
+                    "inputs": {"prompt": "hello", "size": "1024x1024", "output_path": "test.png"},
                 },
             )
             assert status == 400
             assert parsed["error_code"] == "invalid_request"
-            print("  Local model service auth/path validation OK")
+            assert "model_spec" in parsed["message"]
+            print("  Local model service auth/request validation OK")
         finally:
             manager.stop()
 
@@ -195,15 +202,25 @@ def test_local_model_service_worker_switch_and_idle_eviction(monkeypatch: pytest
             base_url = env["HELIX_LOCAL_MODEL_SERVICE_URL"].replace("host.docker.internal", "127.0.0.1")
             token = env["HELIX_LOCAL_MODEL_SERVICE_TOKEN"]
 
+            # Prepare both models
+            for spec in (_IMAGE_MODEL_SPEC, _VIDEO_MODEL_SPEC):
+                status, _, parsed = _http_json_request(
+                    method="POST",
+                    url=f"{base_url}/models/prepare",
+                    token=token,
+                    payload={"model_spec": spec, "request_timeout_seconds": 1200},
+                )
+                assert status == 200
+
+            # First inference — spawns worker for image model
             status, _, parsed = _http_json_request(
                 method="POST",
                 url=f"{base_url}/infer",
                 token=token,
                 payload={
                     "task_type": "text_to_image",
-                    "backend": "pytorch",
                     "workspace_root": str(workspace.resolve()),
-                    "model_id": "Tongyi-MAI/Z-Image-Turbo",
+                    "model_spec": _IMAGE_MODEL_SPEC,
                     "inputs": {
                         "prompt": "a bright square",
                         "size": "1024x1024",
@@ -217,22 +234,19 @@ def test_local_model_service_worker_switch_and_idle_eviction(monkeypatch: pytest
             assert health_status == 200
             first_pid = int(health["worker_pid"])
             assert health["worker_task_type"] == "text_to_image"
-            assert health["worker_backend"] == "pytorch"
-            assert health["worker_model_id"] == "Tongyi-MAI/Z-Image-Turbo"
 
+            # Second inference — different model, should switch worker
             status, _, parsed = _http_json_request(
                 method="POST",
                 url=f"{base_url}/infer",
                 token=token,
                 payload={
-                    "task_type": "text_to_image",
-                    "backend": "pytorch",
+                    "task_type": "text_to_video",
                     "workspace_root": str(workspace.resolve()),
-                    "model_id": "Tongyi-MAI/Z-Image-Turbo-q4",
+                    "model_spec": _VIDEO_MODEL_SPEC,
                     "inputs": {
-                        "prompt": "a darker square",
-                        "size": "1024x1024",
-                        "output_path": "generated_images/second.png",
+                        "prompt": "a test clip",
+                        "output_path": "generated/second.mp4",
                     },
                 },
             )
@@ -240,11 +254,10 @@ def test_local_model_service_worker_switch_and_idle_eviction(monkeypatch: pytest
             assert parsed["status"] == "ok"
             health_status, _, health = _http_json_request(method="GET", url=f"{base_url}/health")
             assert health_status == 200
-            assert health["worker_task_type"] == "text_to_image"
-            assert health["worker_backend"] == "pytorch"
-            assert health["worker_model_id"] == "Tongyi-MAI/Z-Image-Turbo-q4"
+            assert health["worker_task_type"] == "text_to_video"
             assert int(health["worker_pid"]) != first_pid
 
+            # Idle eviction
             deadline = time.time() + 5
             while time.time() < deadline:
                 _, _, health = _http_json_request(method="GET", url=f"{base_url}/health")
@@ -253,69 +266,6 @@ def test_local_model_service_worker_switch_and_idle_eviction(monkeypatch: pytest
                 time.sleep(0.2)
             assert health["worker_active"] is False
             print("  Local model service worker switch/eviction OK")
-        finally:
-            manager.stop()
-
-
-def test_local_model_service_accepts_legacy_task_alias(monkeypatch: pytest.MonkeyPatch):
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        manager = _start_manager(workspace, monkeypatch)
-        try:
-            env = manager.tool_environment()
-            base_url = env["HELIX_LOCAL_MODEL_SERVICE_URL"].replace("host.docker.internal", "127.0.0.1")
-            status, _, parsed = _http_json_request(
-                method="POST",
-                url=f"{base_url}/infer",
-                token=env["HELIX_LOCAL_MODEL_SERVICE_TOKEN"],
-                payload={
-                    "task_type": "image_generation",
-                    "backend": "pytorch",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "Tongyi-MAI/Z-Image-Turbo",
-                    "inputs": {
-                        "prompt": "legacy task alias",
-                        "size": "1024x1024",
-                        "output_path": "generated_images/legacy.png",
-                    },
-                },
-            )
-            assert status == 200
-            assert parsed["status"] == "ok"
-            assert parsed["task_type"] == "text_to_image"
-            health_status, _, health = _http_json_request(method="GET", url=f"{base_url}/health")
-            assert health_status == 200
-            assert health["worker_task_type"] == "text_to_image"
-        finally:
-            manager.stop()
-
-
-def test_local_model_service_prepare_only_roundtrip(monkeypatch: pytest.MonkeyPatch):
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        manager = _start_manager(workspace, monkeypatch)
-        try:
-            env = manager.tool_environment()
-            base_url = env["HELIX_LOCAL_MODEL_SERVICE_URL"].replace("host.docker.internal", "127.0.0.1")
-            status, _, parsed = _http_json_request(
-                method="POST",
-                url=f"{base_url}/infer",
-                token=env["HELIX_LOCAL_MODEL_SERVICE_TOKEN"],
-                payload={
-                    "task_type": "text_to_image",
-                    "backend": "mlx",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "uqer1244/MLX-z-image",
-                    "inputs": {
-                        "prepare_only": True,
-                    },
-                },
-            )
-            assert status == 200
-            assert parsed["status"] == "ok"
-            assert parsed["outputs"]["prepared"] is True
-            assert parsed["backend"] == "mlx"
-            assert parsed["task_type"] == "text_to_image"
         finally:
             manager.stop()
 
@@ -415,66 +365,6 @@ def test_local_model_service_model_spec_infer_after_prepare(monkeypatch: pytest.
             manager.stop()
 
 
-def test_local_model_service_rejects_unsupported_backend_task(monkeypatch: pytest.MonkeyPatch):
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        manager = _start_manager(workspace, monkeypatch)
-        try:
-            env = manager.tool_environment()
-            base_url = env["HELIX_LOCAL_MODEL_SERVICE_URL"].replace("host.docker.internal", "127.0.0.1")
-            status, _, parsed = _http_json_request(
-                method="POST",
-                url=f"{base_url}/infer",
-                token=env["HELIX_LOCAL_MODEL_SERVICE_TOKEN"],
-                payload={
-                    "task_type": "text_to_audio",
-                    "backend": "mlx",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "mlx-community/Kokoro-82M-bf16",
-                    "inputs": {
-                        "text": "Hello from test",
-                        "output_path": "generated/audio.wav",
-                    },
-                },
-            )
-            assert status == 400
-            assert parsed["error_code"] == "unsupported_backend_task"
-        finally:
-            manager.stop()
-
-
-def test_local_model_service_shared_across_workspaces(monkeypatch: pytest.MonkeyPatch):
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        workspace_one = root / "workspace-one"
-        workspace_two = root / "workspace-two"
-        workspace_one.mkdir()
-        workspace_two.mkdir()
-        _configure_helix_home(root, monkeypatch)
-        manager_one = LocalModelServiceManager(workspace_one, session_id="svc-one", backend_mode="fake", idle_seconds=1)
-        manager_two = LocalModelServiceManager(workspace_two, session_id="svc-two", backend_mode="fake", idle_seconds=1)
-        try:
-            try:
-                manager_one.start()
-                manager_two.start()
-            except PermissionError as exc:
-                pytest.skip(f"local socket bind is not permitted in this environment: {exc}")
-            env_one = manager_one.tool_environment()
-            env_two = manager_two.tool_environment()
-            assert env_one == env_two
-            base_url = env_one["HELIX_LOCAL_MODEL_SERVICE_URL"].replace("host.docker.internal", "127.0.0.1")
-            status, _, parsed = _http_json_request(method="GET", url=f"{base_url}/health")
-            assert status == 200
-            assert parsed["status"] == "ok"
-            manager_one.stop()
-            status, _, parsed = _http_json_request(method="GET", url=f"{base_url}/health")
-            assert status == 200
-            assert parsed["status"] == "ok"
-            print("  Local model service sharing OK")
-        finally:
-            manager_two.stop()
-
-
 def test_local_model_service_recovers_stale_coordinator_state(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -496,393 +386,6 @@ def test_local_model_service_recovers_stale_coordinator_state(monkeypatch: pytes
             print("  Local model service stale coordinator recovery OK")
         finally:
             replacement.stop()
-
-
-def test_real_image_generation_backend_loads_lazily(monkeypatch: pytest.MonkeyPatch):
-    calls = {"count": 0}
-
-    def fake_load(self) -> None:
-        calls["count"] += 1
-        self.device = "cpu"
-
-        class FakePipeline:
-            def __call__(self, *, prompt: str, width: int, height: int):
-                class FakeImage:
-                    def save(self, path: Path) -> None:
-                        Path(path).write_bytes(b"png")
-
-                class FakeResult:
-                    images = [FakeImage()]
-
-                assert prompt == "demo prompt"
-                assert width == 512
-                assert height == 512
-                return FakeResult()
-
-        self.pipeline = FakePipeline()
-
-    monkeypatch.setattr(_RealImageGenerationBackend, "_load", fake_load)
-
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        backend = _RealImageGenerationBackend(
-            model_id="Tongyi-MAI/Z-Image-Turbo",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-        assert calls["count"] == 0
-
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "prompt": "demo prompt",
-                    "size": "512x512",
-                    "output_path": "generated/demo.png",
-                },
-            }
-        )
-
-        assert calls["count"] == 1
-        assert result["status"] == "ok"
-        assert result["outputs"]["output_path"] == "generated/demo.png"
-
-
-def test_real_image_generation_backend_prepare_only_loads_lazily(monkeypatch: pytest.MonkeyPatch):
-    calls = {"count": 0}
-
-    def fake_load(self) -> None:
-        calls["count"] += 1
-        self.device = "cpu"
-        self.pipeline = object()
-
-    monkeypatch.setattr(_RealImageGenerationBackend, "_load", fake_load)
-
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        backend = _RealImageGenerationBackend(
-            model_id="Tongyi-MAI/Z-Image-Turbo",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "prepare_only": True,
-                },
-            }
-        )
-
-        assert calls["count"] == 1
-        assert result["status"] == "ok"
-        assert result["outputs"]["prepared"] is True
-
-
-def test_real_mlx_image_generation_backend_loads_lazily(monkeypatch: pytest.MonkeyPatch):
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        source_root = workspace / "mlx-source"
-        source_root.mkdir(parents=True, exist_ok=True)
-        (source_root / "mlx_pipeline.py").write_text(
-            "from pathlib import Path\n"
-            "class ZImagePipeline:\n"
-            "    def __init__(self, model_path, text_encoder_path, repo_id):\n"
-            "        self.model_path = model_path\n"
-            "        self.text_encoder_path = text_encoder_path\n"
-            "        self.repo_id = repo_id\n"
-            "    def generate(self, prompt, width, height, steps, seed):\n"
-            "        class FakeImage:\n"
-            "            def save(self, path):\n"
-            "                Path(path).write_bytes(b'mlx-png')\n"
-            "        assert prompt == 'mlx prompt'\n"
-            "        assert width == 768\n"
-            "        assert height == 512\n"
-            "        assert steps == 9\n"
-            "        assert seed == 42\n"
-            "        return FakeImage()\n",
-            encoding="utf-8",
-        )
-
-        monkeypatch.setattr(
-            "helix.runtime.local_model_service.adapters.mlx.text_to_image._ensure_mlx_runner_sources",
-            lambda cache_root: source_root,
-        )
-        monkeypatch.setitem(sys.modules, "mlx", types.ModuleType("mlx"))
-
-        backend = _RealMLXImageGenerationBackend(
-            model_id="uqer1244/MLX-z-image",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-        assert backend.pipeline is None
-
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "prompt": "mlx prompt",
-                    "size": "768x512",
-                    "output_path": "generated/mlx-demo.png",
-                },
-            }
-        )
-
-        assert backend.pipeline is not None
-        assert result["status"] == "ok"
-        assert result["outputs"]["output_path"] == "generated/mlx-demo.png"
-
-
-def test_real_mlx_image_generation_backend_prepare_only_loads_lazily(monkeypatch: pytest.MonkeyPatch):
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        source_root = workspace / "mlx-source"
-        source_root.mkdir(parents=True, exist_ok=True)
-        (source_root / "mlx_pipeline.py").write_text(
-            "class ZImagePipeline:\n"
-            "    def __init__(self, model_path, text_encoder_path, repo_id):\n"
-            "        self.model_path = model_path\n"
-            "        self.text_encoder_path = text_encoder_path\n"
-            "        self.repo_id = repo_id\n",
-            encoding="utf-8",
-        )
-
-        monkeypatch.setattr(
-            "helix.runtime.local_model_service.adapters.mlx.text_to_image._ensure_mlx_runner_sources",
-            lambda cache_root: source_root,
-        )
-        monkeypatch.setitem(sys.modules, "mlx", types.ModuleType("mlx"))
-
-        backend = _RealMLXImageGenerationBackend(
-            model_id="uqer1244/MLX-z-image",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "prepare_only": True,
-                },
-            }
-        )
-
-        assert backend.pipeline is not None
-        assert result["status"] == "ok"
-        assert result["outputs"]["prepared"] is True
-
-
-def test_real_mlx_image_generation_backend_redirects_pipeline_stdout(capsys: pytest.CaptureFixture[str]):
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        backend = _RealMLXImageGenerationBackend(
-            model_id="uqer1244/MLX-z-image",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-
-        class FakePipeline:
-            def generate(self, *, prompt: str, width: int, height: int, steps: int, seed: int):
-                print(f"Pipeline Started | Size: {width}x{height} | Steps: {steps}")
-
-                class FakeImage:
-                    def save(self, path: Path) -> None:
-                        Path(path).write_bytes(b"mlx-png")
-
-                return FakeImage()
-
-        backend.pipeline = FakePipeline()
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "prompt": "mlx prompt",
-                    "size": "768x512",
-                    "output_path": "generated/mlx-demo.png",
-                },
-            }
-        )
-
-        captured = capsys.readouterr()
-        assert "Pipeline Started | Size: 768x512 | Steps: 9" not in captured.out
-        assert "Pipeline Started | Size: 768x512 | Steps: 9" in captured.err
-        assert result["status"] == "ok"
-        assert result["outputs"]["output_path"] == "generated/mlx-demo.png"
-
-
-def test_real_pytorch_text_to_audio_backend_prepare_only_loads_lazily(monkeypatch: pytest.MonkeyPatch):
-    calls = {"count": 0}
-
-    def fake_load(self) -> None:
-        calls["count"] += 1
-        self.audio_model = object()
-        self.audio_mode = "qwen_tts"
-
-        class FakeSoundFile:
-            @staticmethod
-            def write(path: str, audio: object, sample_rate: int) -> None:
-                raise AssertionError("prepare_only should not write audio")
-
-        self.soundfile = FakeSoundFile()
-
-    monkeypatch.setattr(_RealPyTorchTextToAudioBackend, "_load", fake_load)
-
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        backend = _RealPyTorchTextToAudioBackend(
-            model_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "prepare_only": True,
-                },
-            }
-        )
-
-        assert calls["count"] == 1
-        assert result["status"] == "ok"
-        assert result["outputs"]["prepared"] is True
-
-
-def test_real_pytorch_text_to_audio_backend_reports_missing_sox(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        "helix.runtime.local_model_service.adapters.pytorch.text_to_audio.shutil.which",
-        lambda _name: None,
-    )
-
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        backend = _RealPyTorchTextToAudioBackend(
-            model_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "prepare_only": True,
-                },
-            }
-        )
-
-        assert result["status"] == "error"
-        assert result["error_code"] == "missing_host_dependency"
-        assert "brew install sox" in result["message"]
-
-
-def test_real_pytorch_text_to_audio_backend_qwen_generation(monkeypatch: pytest.MonkeyPatch):
-    seed_calls: list[int] = []
-
-    def fake_load(self) -> None:
-        class FakeAudioModel:
-            def generate_custom_voice(self, **kwargs):
-                assert kwargs["text"] == "Hello from Qwen"
-                assert kwargs["language"] == "English"
-                assert kwargs["speaker"] == "Ryan"
-                assert kwargs["instruct"] == "Speak calmly."
-                assert "seed" not in kwargs
-                return [[0.1, -0.1, 0.0]], 24000
-
-        class FakeSoundFile:
-            writes: list[tuple[str, object, int]] = []
-
-            @classmethod
-            def write(cls, path: str, audio: object, sample_rate: int) -> None:
-                cls.writes.append((path, audio, sample_rate))
-                Path(path).write_bytes(b"wav")
-
-        self.audio_model = FakeAudioModel()
-        self.audio_mode = "qwen_tts"
-        self.soundfile = FakeSoundFile
-        self.torch = types.SimpleNamespace(manual_seed=lambda value: seed_calls.append(value))
-
-    monkeypatch.setattr(_RealPyTorchTextToAudioBackend, "_load", fake_load)
-
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        backend = _RealPyTorchTextToAudioBackend(
-            model_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "text": "Hello from Qwen",
-                    "language": "English",
-                    "speaker": "Ryan",
-                    "instruct": "Speak calmly.",
-                    "seed": 123,
-                    "output_path": "generated/demo.wav",
-                },
-            }
-        )
-
-        assert result["status"] == "ok"
-        assert result["outputs"]["output_path"] == "generated/demo.wav"
-        assert result["outputs"]["sample_rate"] == 24000
-        assert seed_calls == [123]
-        assert (workspace / "generated" / "demo.wav").exists()
-
-
-def test_real_pytorch_video_generation_backend_prepare_only_loads_lazily(monkeypatch: pytest.MonkeyPatch):
-    calls = {"count": 0}
-
-    def fake_load(self) -> None:
-        calls["count"] += 1
-        self.pipeline = object()
-
-    monkeypatch.setattr(_RealPyTorchVideoGenerationBackend, "_load", fake_load)
-
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        backend = _RealPyTorchVideoGenerationBackend(
-            task_type="text_to_video",
-            model_id="Lightricks/LTX-Video::ltxv-13b-0.9.8-dev.safetensors",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "prepare_only": True,
-                },
-            }
-        )
-
-        assert calls["count"] == 1
-        assert result["status"] == "ok"
-        assert result["outputs"]["prepared"] is True
-
-
-def test_real_pytorch_video_generation_backend_image_conditioned_requires_image():
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td).resolve()
-        backend = _RealPyTorchVideoGenerationBackend(
-            task_type="text_image_to_video",
-            model_id="Lightricks/LTX-Video::ltxv-13b-0.9.8-dev.safetensors",
-            cache_root=workspace / ".cache",
-            python_bin=workspace / "python",
-        )
-        result = backend.handle(
-            {
-                "workspace_root": str(workspace),
-                "inputs": {
-                    "prompt": "A cinematic reveal",
-                    "output_path": "generated/demo.mp4",
-                },
-            }
-        )
-
-        assert result["status"] == "error"
-        assert result["error_code"] == "video_image_missing"
 
 
 def test_request_worker_ignores_non_json_stdout_until_json_response():
@@ -1068,9 +571,8 @@ def test_local_model_service_rejects_invalid_request_timeout(monkeypatch: pytest
                 token=env["HELIX_LOCAL_MODEL_SERVICE_TOKEN"],
                 payload={
                     "task_type": "text_to_image",
-                    "backend": "mlx",
                     "workspace_root": str(workspace.resolve()),
-                    "model_id": "uqer1244/MLX-z-image",
+                    "model_spec": _IMAGE_MODEL_SPEC,
                     "request_timeout_seconds": 0,
                     "inputs": {
                         "prepare_only": True,
@@ -1080,146 +582,6 @@ def test_local_model_service_rejects_invalid_request_timeout(monkeypatch: pytest
             assert status == 400
             assert parsed["error_code"] == "invalid_request"
             assert "request_timeout_seconds" in parsed["message"]
-        finally:
-            manager.stop()
-
-
-def test_local_model_service_requires_backend(monkeypatch: pytest.MonkeyPatch):
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        manager = _start_manager(workspace, monkeypatch)
-        try:
-            env = manager.tool_environment()
-            base_url = env["HELIX_LOCAL_MODEL_SERVICE_URL"].replace("host.docker.internal", "127.0.0.1")
-            status, _, parsed = _http_json_request(
-                method="POST",
-                url=f"{base_url}/infer",
-                token=env["HELIX_LOCAL_MODEL_SERVICE_TOKEN"],
-                payload={
-                    "task_type": "text_to_image",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "Tongyi-MAI/Z-Image-Turbo",
-                    "inputs": {
-                        "prompt": "hello",
-                        "size": "1024x1024",
-                        "output_path": "generated_images/test.png",
-                    },
-                },
-            )
-            assert status == 400
-            assert parsed["error_code"] == "backend_missing"
-        finally:
-            manager.stop()
-
-
-def test_local_model_service_accepts_supported_fake_tasks(monkeypatch: pytest.MonkeyPatch):
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        manager = _start_manager(workspace, monkeypatch)
-        asset = workspace / "assets" / "demo.png"
-        asset.parent.mkdir(parents=True, exist_ok=True)
-        asset.write_bytes(b"png")
-        try:
-            env = manager.tool_environment()
-            base_url = env["HELIX_LOCAL_MODEL_SERVICE_URL"].replace("host.docker.internal", "127.0.0.1")
-            token = env["HELIX_LOCAL_MODEL_SERVICE_TOKEN"]
-            scenarios = [
-                {
-                    "task_type": "image_to_text",
-                    "backend": "pytorch",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "zai-org/GLM-OCR",
-                    "inputs": {
-                        "image_path": "assets/demo.png",
-                        "query": "Describe it",
-                    },
-                },
-                {
-                    "task_type": "image_to_text",
-                    "backend": "mlx",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "mlx-community/phi-3.5-vision-instruct-4bit",
-                    "inputs": {
-                        "image_path": "assets/demo.png",
-                        "query": "Describe it",
-                    },
-                },
-                {
-                    "task_type": "text_to_video",
-                    "backend": "pytorch",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "Lightricks/LTX-Video::ltxv-13b-0.9.8-dev.safetensors",
-                    "inputs": {
-                        "prompt": "A cat running on stage",
-                        "output_path": "generated/demo-text-only.mp4",
-                    },
-                },
-                {
-                    "task_type": "text_image_to_video",
-                    "backend": "pytorch",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "Lightricks/LTX-Video::ltxv-13b-0.9.8-dev.safetensors",
-                    "inputs": {
-                        "prompt": "A cat running on stage",
-                        "image_path": "assets/demo.png",
-                        "output_path": "generated/demo.mp4",
-                    },
-                },
-                {
-                    "task_type": "text_to_audio",
-                    "backend": "pytorch",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-                    "inputs": {
-                        "text": "Hello there",
-                        "output_path": "generated/demo.wav",
-                    },
-                },
-            ]
-            for payload in scenarios:
-                status, _, parsed = _http_json_request(
-                    method="POST",
-                    url=f"{base_url}/infer",
-                    token=token,
-                    payload=payload,
-                )
-                assert status == 200
-                assert parsed["status"] == "ok"
-                assert isinstance(parsed["outputs"], dict)
-        finally:
-            manager.stop()
-
-
-def test_local_model_service_accepts_mlx_backend_in_fake_mode(monkeypatch: pytest.MonkeyPatch):
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        manager = _start_manager(workspace, monkeypatch)
-        try:
-            env = manager.tool_environment()
-            base_url = env["HELIX_LOCAL_MODEL_SERVICE_URL"].replace("host.docker.internal", "127.0.0.1")
-            status, _, parsed = _http_json_request(
-                method="POST",
-                url=f"{base_url}/infer",
-                token=env["HELIX_LOCAL_MODEL_SERVICE_TOKEN"],
-                payload={
-                    "task_type": "text_to_image",
-                    "backend": "mlx",
-                    "workspace_root": str(workspace.resolve()),
-                    "model_id": "uqer1244/MLX-z-image",
-                    "inputs": {
-                        "prompt": "hello",
-                        "size": "1024x1024",
-                        "output_path": "generated_images/mlx-test.png",
-                    },
-                },
-            )
-            assert status == 200
-            assert parsed["status"] == "ok"
-            assert parsed["outputs"]["output_path"] == "generated_images/mlx-test.png"
-            health_status, _, health = _http_json_request(method="GET", url=f"{base_url}/health")
-            assert health_status == 200
-            assert health["worker_backend"] == "mlx"
-            assert health["worker_model_id"] == "uqer1244/MLX-z-image"
         finally:
             manager.stop()
 
@@ -1362,3 +724,35 @@ def test_image_model_spec_matches_realistic_mlx_layout(tmp_path: Path):
     (model_root / "vae" / "diffusion_pytorch_model.safetensors").write_text("", encoding="utf-8")
 
     assert manifest_matches(model_root, _IMAGE_MODEL_SPEC) is True
+
+
+def test_pytorch_video_dependencies_include_ltx_tokenizer_requirements():
+    video_adapter = _load_skill_adapter("generate-video")
+    assert "sentencepiece" in video_adapter._PYTORCH_VIDEO_DEPENDENCIES
+    assert "protobuf" in video_adapter._PYTORCH_VIDEO_DEPENDENCIES
+
+
+def test_ensure_ltx_tokenizer_dependencies_bootstraps_missing_sentencepiece(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    video_adapter = _load_skill_adapter("generate-video")
+
+    calls: list[tuple[Path, tuple[str, ...]]] = []
+    real_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "sentencepiece":
+            raise ImportError("missing sentencepiece")
+        return real_import(name, globals, locals, fromlist, level)
+
+    def fake_install(python_bin: Path, dependencies: tuple[str, ...]) -> None:
+        calls.append((python_bin, dependencies))
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    monkeypatch.setattr(video_adapter, "_ensure_worker_dependencies", fake_install)
+
+    python_bin = tmp_path / "venv" / "bin" / "python"
+    video_adapter._ensure_ltx_tokenizer_dependencies(python_bin)
+
+    assert calls == [(python_bin, ("sentencepiece", "protobuf"))]

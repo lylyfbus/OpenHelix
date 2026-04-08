@@ -16,12 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helix.runtime.host import RuntimeHost
 from helix.providers import create_provider as _create_provider
+from helix.providers.openai_compat import LLMProvider
 from helix.runtime.display import TURN_SEPARATOR, extract_streaming_response
 from helix.runtime.cli import build_parser, main as cli_main
 from helix.core.environment import Environment
 from helix.core.state import Turn
-from helix.providers.ollama import OllamaProvider
-from helix.providers.openai_compat import OpenAICompatProvider
 
 
 # Path to the real workspace
@@ -69,34 +68,37 @@ def _make_host(workspace: Path, **kwargs) -> RuntimeHost:
 # =========================================================================== #
 
 
-def test_provider_factory_ollama():
-    """Verify provider factory creates OllamaProvider for 'ollama'."""
-    provider = _create_provider("ollama")
-    assert isinstance(provider, OllamaProvider)
-    print("  Provider factory (ollama) OK")
+def test_provider_factory_default():
+    """Verify provider factory creates LLMProvider with defaults."""
+    provider = _create_provider()
+    assert isinstance(provider, LLMProvider)
+    assert "11434" in provider.endpoint
+    assert provider.model == "llama3.1:8b"
+    print("  Provider factory (default) OK")
 
 
-def test_provider_factory_deepseek():
-    """Verify provider factory creates OpenAICompatProvider for 'deepseek'."""
-    provider = _create_provider("deepseek")
-    assert isinstance(provider, OpenAICompatProvider)
-    assert "deepseek" in provider.endpoint
-    print("  Provider factory (deepseek) OK")
-
-
-def test_provider_factory_lmstudio():
-    """Verify provider factory creates OpenAICompatProvider for 'lmstudio'."""
-    provider = _create_provider("lmstudio")
-    assert isinstance(provider, OpenAICompatProvider)
-    print("  Provider factory (lmstudio) OK")
+def test_provider_factory_custom_base_url():
+    """Verify provider factory passes base_url."""
+    provider = _create_provider(base_url="https://api.deepseek.com/v1")
+    assert isinstance(provider, LLMProvider)
+    assert "deepseek.com" in provider.endpoint
+    print("  Provider factory (custom base_url) OK")
 
 
 def test_provider_factory_with_model():
     """Verify provider factory passes model override."""
-    provider = _create_provider("ollama", model="custom-model")
-    assert isinstance(provider, OllamaProvider)
+    provider = _create_provider(model="custom-model")
+    assert isinstance(provider, LLMProvider)
     assert provider.model == "custom-model"
     print("  Provider factory (with model) OK")
+
+
+def test_provider_factory_with_api_key():
+    """Verify provider factory passes API key."""
+    provider = _create_provider(api_key="test-key-123")
+    assert isinstance(provider, LLMProvider)
+    assert provider.api_key == "test-key-123"
+    print("  Provider factory (with api_key) OK")
 
 
 # =========================================================================== #
@@ -109,10 +111,9 @@ def test_host_init():
     with tempfile.TemporaryDirectory() as td:
         host = _make_host(
             workspace=Path(td),
-            provider="ollama",
             mode="auto",
         )
-        assert host.provider_name == "ollama"
+        assert host._model.model == "llama3.1:8b"
         assert host.mode == "auto"
         assert host.workspace == Path(td).resolve()
         assert host.session_id == "session-01"
@@ -135,10 +136,13 @@ def test_host_init_controlled():
     with tempfile.TemporaryDirectory() as td:
         host = _make_host(
             workspace=Path(td),
-            provider="deepseek",
+            base_url="https://api.deepseek.com/v1",
+            api_key="test-key",
+            model="deepseek-chat",
             mode="controlled",
         )
-        assert host.provider_name == "deepseek"
+        assert host._model.model == "deepseek-chat"
+        assert "deepseek.com" in host._model.base_url
         assert host.mode == "controlled"
         print("  RuntimeHost init (controlled) OK")
 
@@ -160,7 +164,6 @@ def test_host_init_with_session_id_loads_existing_state():
 
         host = _make_host(
             workspace=workspace,
-            provider="ollama",
             mode="auto",
             session_id="review-01",
         )
@@ -360,7 +363,8 @@ def test_host_command_status():
     with tempfile.TemporaryDirectory() as td:
         host = _make_host(Path(td))
         result = host._handle_command("/status")
-        assert "provider=" in result
+        assert "llm_base_url=" in result
+        assert "llm_model=" in result
         assert "mode=" in result
         assert "session_state=new" in result
         assert "image_analysis=" not in result
@@ -705,13 +709,15 @@ def test_cli_parser():
     """Verify CLI parser handles all arguments correctly."""
     parser = build_parser()
     args = parser.parse_args([
-        "--provider", "deepseek",
+        "--base-url", "https://api.deepseek.com/v1",
+        "--api-key", "test-key",
         "--mode", "auto",
         "--model", "deepseek-chat",
         "--workspace", "/tmp/test",
         "--session-id", "design-01",
     ])
-    assert args.provider == "deepseek"
+    assert args.base_url == "https://api.deepseek.com/v1"
+    assert args.api_key == "test-key"
     assert args.mode == "auto"
     assert args.model == "deepseek-chat"
     assert args.workspace == "/tmp/test"
@@ -778,10 +784,10 @@ def test_streaming_extractor_not_yet():
 
 if __name__ == "__main__":
     print("=== Provider Factory ===")
-    test_provider_factory_ollama()
-    test_provider_factory_deepseek()
-    test_provider_factory_lmstudio()
+    test_provider_factory_default()
+    test_provider_factory_custom_base_url()
     test_provider_factory_with_model()
+    test_provider_factory_with_api_key()
 
     print("\n=== RuntimeHost Init ===")
     test_host_init()

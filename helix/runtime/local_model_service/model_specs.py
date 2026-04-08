@@ -8,37 +8,22 @@ from pathlib import Path
 from typing import Any
 
 from .paths import _backend_cache_root, _safe_model_dir_name
-from .protocol import (
-    _BACKEND_MLX,
-    _BACKEND_PYTORCH,
-    _TASK_TEXT_IMAGE_TO_VIDEO,
-    _TASK_TEXT_TO_AUDIO,
-    _TASK_TEXT_TO_IMAGE,
-    _TASK_TEXT_TO_VIDEO,
-    _canonical_task_type,
-)
+from .protocol import _canonical_task_type
 
 
 _PREPARED_MARKER_NAME = ".helix-model-prepared.json"
 
-_SUPPORTED_MODEL_FAMILIES: dict[str, dict[str, Any]] = {
-    "mlx.z_image": {
-        "backend": _BACKEND_MLX,
-        "task_types": {_TASK_TEXT_TO_IMAGE},
-    },
-    "pytorch.qwen_tts_custom_voice": {
-        "backend": _BACKEND_PYTORCH,
-        "task_types": {_TASK_TEXT_TO_AUDIO},
-    },
-    "pytorch.diffusers_ltx_video": {
-        "backend": _BACKEND_PYTORCH,
-        "task_types": {_TASK_TEXT_TO_VIDEO, _TASK_TEXT_IMAGE_TO_VIDEO},
-    },
-    "pytorch.diffusers_wan_video": {
-        "backend": _BACKEND_PYTORCH,
-        "task_types": {_TASK_TEXT_TO_VIDEO, _TASK_TEXT_IMAGE_TO_VIDEO},
-    },
-}
+# Populated at startup by adapter_discovery.discover_and_register_builtins()
+# and discover_and_register() for workspace skills.
+_SUPPORTED_MODEL_FAMILIES: dict[str, dict[str, Any]] = {}
+
+
+def register_family(family: str, *, backend: str, task_types: set[str]) -> None:
+    """Register a new model family (e.g. from a skill adapter)."""
+    _SUPPORTED_MODEL_FAMILIES[family] = {
+        "backend": backend,
+        "task_types": set(task_types),
+    }
 
 
 def _require_string(value: Any, *, name: str) -> str:
@@ -162,10 +147,7 @@ def model_spec_backend_cache_root(cache_root: Path, model_spec: dict[str, Any]) 
 def model_spec_model_root(cache_root: Path, model_spec: dict[str, Any]) -> Path:
     normalized = normalize_model_spec(model_spec)
     backend_root = model_spec_backend_cache_root(cache_root, normalized)
-    family = normalized["family"]
     repo_id = normalized["source"]["repo_id"]
-    if family == "mlx.z_image":
-        return (backend_root / "mlx-models" / _safe_model_dir_name(repo_id)).resolve()
     return (backend_root / "models" / _safe_model_dir_name(repo_id)).resolve()
 
 

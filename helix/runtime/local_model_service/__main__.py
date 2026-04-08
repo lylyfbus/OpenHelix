@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 
 from .coordinator import _coordinator_main
-from .protocol import _DEFAULT_BACKEND_MODE, _DEFAULT_IDLE_SECONDS, _SUPPORTED_TASK_TYPES
+from .protocol import _DEFAULT_BACKEND_MODE, _DEFAULT_IDLE_SECONDS
 from .worker import _worker_main
 
 
@@ -21,15 +21,17 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator.add_argument("--token", required=True)
     coordinator.add_argument("--idle-seconds", default=str(_DEFAULT_IDLE_SECONDS))
     coordinator.add_argument("--backend-mode", default=_DEFAULT_BACKEND_MODE)
+    coordinator.add_argument("--skills-root", default="")
 
     worker = subparsers.add_parser("worker")
     worker.add_argument("--cache-root", required=True)
-    worker.add_argument("--task-type", required=True, choices=list(_SUPPORTED_TASK_TYPES))
+    worker.add_argument("--task-type", required=True)
     worker.add_argument("--backend", required=True)
     worker.add_argument("--model-id", required=True)
     worker.add_argument("--model-spec-json", default="")
     worker.add_argument("--model-root", default="")
     worker.add_argument("--backend-mode", default=_DEFAULT_BACKEND_MODE)
+    worker.add_argument("--skills-root", default="")
 
     return parser
 

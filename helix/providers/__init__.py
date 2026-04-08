@@ -1,18 +1,14 @@
-"""Model provider adapters and protocol.
+"""LLM provider and protocol.
 
 Exports:
     ModelProvider: Protocol that all providers must satisfy.
-    create_provider: Factory to create a provider by name.
+    LLMProvider: Universal OpenAI-compatible provider.
+    create_provider: Factory to create an LLMProvider from CLI/env args.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Protocol
-
-
-# --------------------------------------------------------------------------- #
-# ModelProvider protocol
-# --------------------------------------------------------------------------- #
+from typing import Callable, Optional, Protocol
 
 
 class ModelProvider(Protocol):
@@ -29,26 +25,13 @@ class ModelProvider(Protocol):
         ...
 
 
-# --------------------------------------------------------------------------- #
-# Provider factory
-# --------------------------------------------------------------------------- #
-
-
 def create_provider(
-    provider_name: str,
     *,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
     model: Optional[str] = None,
-) -> Any:
-    """Create the appropriate ModelProvider from a provider name string.
+) -> "LLMProvider":
+    """Create an LLMProvider from explicit args or environment variables."""
+    from .openai_compat import LLMProvider
 
-    Returns an object satisfying the ``ModelProvider`` protocol.
-    """
-    name = provider_name.strip().lower() or "ollama"
-
-    if name == "ollama":
-        from .ollama import OllamaProvider
-        return OllamaProvider(model=model)
-
-    # All other providers go through OpenAI-compatible adapter
-    from .openai_compat import OpenAICompatProvider
-    return OpenAICompatProvider(provider=name, model=model)
+    return LLMProvider(base_url=base_url, api_key=api_key, model=model)

@@ -3,8 +3,8 @@
 from .state import State, Turn
 from .action import Action, parse_action, ActionParseError
 from .agent import Agent
+from .compactor import Compactor, CompactionError
 from .environment import Environment
-from .sandbox import DockerSandboxExecutor, docker_is_available, sandbox_executor
 
 __all__ = [
     "State",
@@ -13,8 +13,7 @@ __all__ = [
     "parse_action",
     "ActionParseError",
     "Agent",
-    "DockerSandboxExecutor",
+    "Compactor",
+    "CompactionError",
     "Environment",
-    "docker_is_available",
-    "sandbox_executor",
 ]

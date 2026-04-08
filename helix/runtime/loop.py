@@ -6,11 +6,10 @@ The entire orchestration reduces to: state → agent → action → environment 
 
 from __future__ import annotations
 
-import json
 import sys
-from typing import TextIO, Callable
+from typing import Any, TextIO, Callable
 
-from ..core.action import Action, ActionParseError
+from ..core.action import Action, ActionParseError, ALLOWED_SUB_ACTIONS
 from ..core.agent import Agent
 from ..core.environment import Environment, CompactionError, ExecutionInterrupted
 from ..core.state import Turn
@@ -25,6 +24,7 @@ def run_loop(
     agent: Agent,
     env: Environment,
     *,
+    model: Any = None,
     max_turns: int = DEFAULT_MAX_TURNS,
     max_retries: int = DEFAULT_MAX_RETRIES,
     output: TextIO = sys.stdout,
@@ -137,7 +137,7 @@ def run_loop(
                 f"runtime> Delegating to sub-agent: {action.payload.get('role', 'unknown')}...\n",
                 add_separator=True,
             )
-            result = env.delegate(action)
+            result = _delegate(action, env, model)
             env.record(Turn(
                 role="sub-agent",
                 content=result,
@@ -147,6 +147,55 @@ def run_loop(
     msg = "Loop ended: maximum turns reached."
     _print(output, f"runtime> {msg}\n", add_separator=True)
     return msg
+
+# --------------------------------------------------------------------------- #
+# Sub-agent delegation
+# --------------------------------------------------------------------------- #
+
+
+def _delegate(action: Action, env: Environment, model: Any) -> str:
+    """Spawn a sub-agent to handle a delegated task.
+
+    Creates an isolated Environment sharing the parent's workspace, executor,
+    compactor, and approval hook, then runs a recursive loop.
+    """
+    task = action.payload
+
+    if model is None:
+        return "Delegation failed: no model reference. Pass model= to run_loop()."
+
+    # Build sub-environment sharing parent's infrastructure
+    sub_env = Environment(
+        workspace=env.workspace,
+        mode=env.mode,
+        token_limit=env.token_limit,
+        keep_last_k=env.keep_last_k,
+        executor=env._executor,
+        compactor=env._compactor,
+    )
+    sub_env._on_before_execute = env._on_before_execute
+
+    # Seed sub-agent with task objective
+    role = task.get("role", "assistant")
+    objective = task.get("objective", "")
+    context = task.get("context", "")
+    seed_content = objective
+    if context:
+        seed_content += f"\n\nContext:\n{context}"
+    sub_env.record(Turn(role="core-agent", content=seed_content))
+
+    # Build sub-agent (cannot delegate further)
+    sub_agent = Agent(
+        model,
+        name="sub-agent",
+        workspace=env.workspace,
+        role="sub_agent",
+        sub_agent_role=role,
+        allowed_actions=ALLOWED_SUB_ACTIONS,
+    )
+
+    return run_loop(sub_agent, sub_env)
+
 
 # --------------------------------------------------------------------------- #
 def _print(output: TextIO, text: str = "", *, action: Action | None = None, add_separator: bool = False) -> None:

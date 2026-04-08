@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from helix.core.sandbox import DockerSandboxExecutor, docker_is_available
+from helix.runtime.sandbox import DockerSandboxExecutor, docker_is_available
 from helix.runtime.local_model_service import LocalModelServiceManager
 
 
@@ -123,7 +123,7 @@ def test_docker_sandbox_persists_python_installs_in_cache():
 
         executor = DockerSandboxExecutor(workspace, searxng_base_url="https://example.com")
         try:
-            assert executor.cache_dir == workspace / ".runtime" / "docker" / "cache"
+            assert executor.cache_dir == (workspace / ".runtime" / "docker" / "cache").resolve()
             install_turn = executor(
                 {
                     "job_name": "docker-pip-install",

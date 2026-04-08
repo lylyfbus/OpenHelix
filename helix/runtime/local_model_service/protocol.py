@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import json
 import os
@@ -12,7 +11,6 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
@@ -32,49 +30,34 @@ _DEFAULT_BACKEND_MODE = os.environ.get(
 ).strip().lower() or _REAL_BACKEND_NAME
 
 _LOCAL_MODEL_SERVICE_NAME = "local-model-service"
-_DEFAULT_GENERATION_MODEL_ID = "uqer1244/MLX-z-image"
 _TASK_TEXT_TO_IMAGE = "text_to_image"
-_TASK_IMAGE_TO_TEXT = "image_to_text"
 _TASK_TEXT_TO_VIDEO = "text_to_video"
 _TASK_TEXT_IMAGE_TO_VIDEO = "text_image_to_video"
 _TASK_TEXT_TO_AUDIO = "text_to_audio"
-_BACKEND_PYTORCH = "pytorch"
-_BACKEND_MLX = "mlx"
-_LEGACY_TASK_TYPE_ALIASES = {
-    "image_generation": _TASK_TEXT_TO_IMAGE,
-}
-_SUPPORTED_TASK_TYPES = (
-    _TASK_TEXT_TO_IMAGE,
-    _TASK_IMAGE_TO_TEXT,
-    _TASK_TEXT_TO_VIDEO,
-    _TASK_TEXT_IMAGE_TO_VIDEO,
-    _TASK_TEXT_TO_AUDIO,
-)
-_SUPPORTED_BACKENDS = (_BACKEND_PYTORCH, _BACKEND_MLX)
-_SUPPORTED_BACKEND_TASKS = {
-    (_TASK_TEXT_TO_IMAGE, _BACKEND_PYTORCH),
-    (_TASK_TEXT_TO_IMAGE, _BACKEND_MLX),
-    (_TASK_IMAGE_TO_TEXT, _BACKEND_PYTORCH),
-    (_TASK_IMAGE_TO_TEXT, _BACKEND_MLX),
-    (_TASK_TEXT_TO_VIDEO, _BACKEND_PYTORCH),
-    (_TASK_TEXT_IMAGE_TO_VIDEO, _BACKEND_PYTORCH),
-    (_TASK_TEXT_TO_AUDIO, _BACKEND_PYTORCH),
-}
+_SUPPORTED_TASK_TYPES: set[str] = set()
+_SUPPORTED_BACKENDS: set[str] = set()
+_SUPPORTED_BACKEND_TASKS: set[tuple[str, str]] = set()
 
-_DEFAULT_IMAGE_ANALYSIS_QUERY = "Describe this image."
+
+def register_task_type(task_type: str) -> None:
+    """Register a new task type (e.g. from a skill adapter)."""
+    _SUPPORTED_TASK_TYPES.add(task_type)
+
+
+def register_backend(backend: str) -> None:
+    """Register a new backend (e.g. from a skill adapter)."""
+    _SUPPORTED_BACKENDS.add(backend)
+
+
+def register_backend_task(task_type: str, backend: str) -> None:
+    """Register a supported (task_type, backend) combination."""
+    _SUPPORTED_BACKEND_TASKS.add((task_type, backend))
+
 _DEFAULT_AUDIO_SAMPLE_RATE = 24000
-
-_FAKE_PNG_BYTES = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9pob7XUAAAAASUVORK5CYII="
-)
-_FAKE_WAV_BYTES = base64.b64decode(
-    "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
-)
-_FAKE_MP4_BYTES = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
 
 
 def local_model_service_supported() -> bool:
-    return sys_platform_is_darwin_arm64()
+    return sys_platform_is_darwin_arm64() or _cuda_available()
 
 
 def sys_platform_is_darwin_arm64() -> bool:
@@ -82,6 +65,19 @@ def sys_platform_is_darwin_arm64() -> bool:
     import sys
 
     return sys.platform == "darwin" and platform.machine().lower() == "arm64"
+
+
+def _cuda_available() -> bool:
+    """Check if NVIDIA GPU is available (Linux with nvidia-smi)."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"], capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 def _json_dumps(payload: dict[str, Any]) -> bytes:
@@ -99,8 +95,15 @@ def _kill_process_tree(pid: int, *, grace_seconds: float = 5.0) -> None:
     if pid <= 0:
         return
     deadline = time.time() + max(0.1, grace_seconds)
-    with contextlib.suppress(ProcessLookupError):
+    # Try group signal first; fall back to individual process signal when
+    # the caller lacks permission (e.g. different session on macOS).
+    try:
         os.killpg(pid, signal.SIGTERM)
+    except PermissionError:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
     while time.time() < deadline:
         try:
             os.kill(pid, 0)
@@ -109,8 +112,13 @@ def _kill_process_tree(pid: int, *, grace_seconds: float = 5.0) -> None:
         except PermissionError:
             break
         time.sleep(0.1)
-    with contextlib.suppress(ProcessLookupError):
+    try:
         os.killpg(pid, signal.SIGKILL)
+    except PermissionError:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def _http_json_request(
@@ -230,10 +238,7 @@ def _request_timeout_seconds(payload: dict[str, Any]) -> int:
 
 
 def _canonical_task_type(task_type: str) -> str:
-    raw = str(task_type or "").strip()
-    if not raw:
-        return ""
-    return _LEGACY_TASK_TYPE_ALIASES.get(raw, raw)
+    return str(task_type or "").strip()
 
 
 def _ok_response(
@@ -275,38 +280,11 @@ def _error_response(
     }
 
 
-def _extract_generated_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, dict):
-        for key in ("generated_text", "text", "output_text"):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
-        return json.dumps(value, ensure_ascii=True)
-    if isinstance(value, list):
-        for item in value:
-            text = _extract_generated_text(item)
-            if text:
-                return text
-        return ""
-    return str(value).strip()
-
-
 def _request_inputs(payload: dict[str, Any]) -> dict[str, Any]:
     inputs = payload.get("inputs")
     if not isinstance(inputs, dict):
         raise ValueError("inputs must be a JSON object")
     return inputs
-
-
-def _bool_input(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    token = str(value or "").strip().lower()
-    return token in {"1", "true", "yes", "on"}
 
 
 def _supported_backend_task(task_type: str, backend: str) -> bool:

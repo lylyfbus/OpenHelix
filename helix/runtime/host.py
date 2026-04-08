@@ -27,9 +27,10 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 
 from ..core.agent import Agent
+from ..core.compactor import Compactor
 from ..core.environment import Environment
 from ..core.state import Turn
-from ..core.sandbox import DockerSandboxExecutor, docker_is_available
+from .sandbox import DockerSandboxExecutor, docker_is_available
 from ..providers import create_provider
 from .local_model_service import LocalModelServiceManager, local_model_service_supported
 from .loop import run_loop
@@ -95,10 +96,11 @@ class RuntimeHost:
     Args:
         workspace: Global workspace root for shared skills, knowledge, and sessions.
         session_id: Session identifier used to resume/persist project state.
-        provider: LLM provider name ("ollama", "deepseek", "lmstudio", "zai", etc.).
+        base_url: LLM API base URL (default from LLM_BASE_URL env or http://localhost:11434/v1).
+        api_key: LLM API key (default from LLM_API_KEY env).
+        model: Model name (default from LLM_MODEL env or llama3.1:8b).
         mode: Execution mode ("auto" or "controlled").
         sandbox_backend: Internal/testing hook. Only ``docker`` is supported.
-        model: Model name override (uses provider defaults if not specified).
     """
 
     HELP_TEXT = "\n".join([
@@ -117,10 +119,11 @@ class RuntimeHost:
         workspace: Path,
         *,
         session_id: Optional[str] = None,
-        provider: str = "ollama",
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
         mode: str = "controlled",
         sandbox_backend: str = "docker",
-        model: Optional[str] = None,
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -135,7 +138,6 @@ class RuntimeHost:
             path.mkdir(parents=True, exist_ok=True)
         self.session_path = (self.state_root / "session.json").resolve()
         self._session_loaded = False
-        self.provider_name = provider
         self.mode = mode
         self.requested_sandbox_backend = str(sandbox_backend).strip().lower() or "docker"
         self.resolved_sandbox_backend = "docker"
@@ -147,7 +149,7 @@ class RuntimeHost:
         self._bootstrap_skills()
 
         # 2. Build components
-        self._model = create_provider(provider, model=model)
+        self._model = create_provider(base_url=base_url, api_key=api_key, model=model)
 
         self._stream_display = StreamingDisplay()
         self._sandbox_executor: object | None = None
@@ -168,11 +170,13 @@ class RuntimeHost:
         )
         self._sandbox_executor = sandbox_executor
 
-        # Create environment with sandbox executor
+        # Create environment with sandbox executor and compactor
+        self._compactor = Compactor(self._model)
         self._env = Environment(
             workspace=self.workspace,
             executor=sandbox_executor,
             mode=mode,
+            compactor=self._compactor,
         )
         self._env.approval_profile = getattr(
             sandbox_executor,
@@ -185,10 +189,6 @@ class RuntimeHost:
         if raw_session is not None:
             self._agent.last_prompt = str(raw_session.get("last_prompt", "") or "")
             self._session_loaded = True
-
-        # Wire model and loop into environment for sub-agent delegation
-        self._env.set_model_ref(self._model)
-        self._env.set_loop_fn(run_loop)
 
         # Register approval policy as execution gate
         self._approval = ApprovalPolicy(
@@ -298,7 +298,7 @@ class RuntimeHost:
         Returns:
             Exit code (0 for normal exit).
         """
-        print(f"Agentic System — provider={self.provider_name}, mode={self.mode}")
+        print(f"Agentic System — model={self._model.model}, mode={self.mode}")
         print(f"Workspace: {self.workspace}")
         state = "resumed" if self._session_loaded else "new"
         print(f"Session: {self.session_id} ({state})")
@@ -351,6 +351,7 @@ class RuntimeHost:
             run_loop(
                 self._agent,
                 self._env,
+                model=self._model,
                 on_turn_start=self._stream_display.reset,
                 on_turn_end=self._stream_display.commit,
                 on_turn_error=self._stream_display.discard,
@@ -387,7 +388,8 @@ class RuntimeHost:
     def _status_text(self) -> str:
         """Build session status overview."""
         lines = [
-            f"provider={self.provider_name}",
+            f"llm_base_url={self._model.base_url}",
+            f"llm_model={self._model.model}",
             f"mode={self.mode}",
             f"sandbox_backend={self.resolved_sandbox_backend}",
             f"workspace={self.workspace}",

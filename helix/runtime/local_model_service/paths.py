@@ -10,72 +10,7 @@ import time
 import venv
 from pathlib import Path
 
-from .protocol import _HTTP_TIMEOUT_SECONDS, _LOCAL_MODEL_SERVICE_NAME
-
-
-_PYTORCH_TEXT_TO_IMAGE_DEPENDENCIES = (
-    "accelerate",
-    "diffusers>=0.35.0",
-    "huggingface_hub",
-    "pillow",
-    "safetensors",
-    "torch",
-    "transformers",
-)
-_PYTORCH_IMAGE_TO_TEXT_DEPENDENCIES = (
-    "accelerate",
-    "huggingface_hub",
-    "pillow",
-    "safetensors",
-    "torch",
-    "transformers",
-)
-_PYTORCH_VIDEO_DEPENDENCIES = (
-    "accelerate",
-    "git+https://github.com/huggingface/diffusers",
-    "huggingface_hub",
-    "imageio",
-    "imageio-ffmpeg",
-    "numpy",
-    "pillow",
-    "safetensors",
-    "torch",
-    "transformers",
-)
-_PYTORCH_TEXT_TO_AUDIO_DEPENDENCIES = (
-    "huggingface_hub",
-    "numpy",
-    "qwen-tts",
-    "soundfile",
-    "torch",
-    "transformers",
-)
-_MLX_GENERATION_DEPENDENCIES = (
-    "accelerate",
-    "diffusers>=0.35.0",
-    "hf_transfer",
-    "huggingface_hub",
-    "mlx>=0.20.0",
-    "numpy",
-    "pillow",
-    "safetensors",
-    "torch",
-    "transformers",
-    "tqdm",
-)
-_MLX_IMAGE_TO_TEXT_DEPENDENCIES = (
-    "huggingface_hub",
-    "mlx>=0.20.0",
-    "mlx-vlm",
-    "pillow",
-)
-_MLX_Z_IMAGE_COMMIT = "b508c3555cd49b5fb5afd3434053a55d1710c129"
-_MLX_Z_IMAGE_FILES = (
-    "lora_utils.py",
-    "mlx_pipeline.py",
-    "mlx_text_encoder.py",
-    "mlx_z_image.py",
-)
+from .protocol import _LOCAL_MODEL_SERVICE_NAME
 
 
 def helix_home() -> Path:
@@ -195,62 +130,5 @@ def _ensure_worker_dependencies(python_bin: Path, dependencies: tuple[str, ...])
         raise RuntimeError(detail or "failed installing worker dependencies")
 
 
-def _download_public_file(url: str, dest: Path) -> None:
-    import urllib.request
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=max(_HTTP_TIMEOUT_SECONDS, 60)) as resp:
-        data = resp.read()
-    dest.write_bytes(data)
-
-
 def _safe_model_dir_name(model_id: str) -> str:
     return str(model_id or "model").strip().replace("/", "--")
-
-
-def _snapshot_download_model(*, repo_id: str, local_dir: Path) -> Path:
-    from huggingface_hub import snapshot_download
-
-    local_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-    return Path(
-        snapshot_download(
-            repo_id=repo_id,
-            local_dir=str(local_dir),
-        )
-    ).resolve()
-
-
-def _download_hub_file(*, repo_id: str, filename: str, local_dir: Path) -> Path:
-    from huggingface_hub import hf_hub_download
-
-    local_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-    return Path(
-        hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            local_dir=str(local_dir),
-        )
-    ).resolve()
-
-
-def _is_qwen_tts_custom_voice_model(model_id: str) -> bool:
-    normalized = str(model_id or "").strip()
-    return normalized.startswith("Qwen/Qwen3-TTS-") and normalized.endswith("-CustomVoice")
-
-
-def _ensure_mlx_runner_sources(cache_root: Path) -> Path:
-    runner_root = cache_root / "sources" / f"mlx_z_image-{_MLX_Z_IMAGE_COMMIT}"
-    runner_root.mkdir(parents=True, exist_ok=True)
-    for filename in _MLX_Z_IMAGE_FILES:
-        target = runner_root / filename
-        if target.exists():
-            continue
-        url = (
-            "https://raw.githubusercontent.com/uqer1244/MLX_z-image/"
-            f"{_MLX_Z_IMAGE_COMMIT}/{filename}"
-        )
-        _download_public_file(url, target)
-    return runner_root
