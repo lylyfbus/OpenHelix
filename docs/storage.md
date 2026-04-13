@@ -5,12 +5,12 @@
 ```
 {workspace}/
   skills/                                   Reusable skill procedures
-    builtin_skills/                         Managed by Helix (synced on startup)
+    builtin_skills/                         Managed by OpenHelix (synced on startup)
       search-online-context/
       generate-image/
       create-skill/
       ...
-    my-custom-skill/                        User-created (never touched by Helix)
+    my-custom-skill/                        User-created (never touched by OpenHelix)
 
   knowledge/                                Knowledge library
     index.json                              Global classification index

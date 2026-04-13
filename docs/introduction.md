@@ -1,8 +1,8 @@
 # Introduction
 
-## What is Helix?
+## What is OpenHelix?
 
-Helix is an open, transparent, fully-local agentic system. It gives an LLM a real computer — a Docker sandbox where it writes and runs bash and python scripts to accomplish tasks. The agent learns over time by creating reusable skills and documenting knowledge in a structured library.
+OpenHelix is an open, transparent, fully-local agentic system. It gives an LLM a real computer — a Docker sandbox where it writes and runs bash and python scripts to accomplish tasks. The agent learns over time by creating reusable skills and documenting knowledge in a structured library.
 
 Everything is designed to run on your own machine. No data leaves your environment unless you choose to connect an external LLM endpoint.
 
@@ -36,7 +36,7 @@ Your workspace files, conversation history, knowledge documents, and generated a
 
 ### Yours to Modify
 
-Helix is a framework you own, not a service you rent. The architecture is intentionally simple:
+OpenHelix is a framework you own, not a service you rent. The architecture is intentionally simple:
 
 - `core/` — State, Action, Agent, Environment (~1000 lines total)
 - `runtime/` — Loop, Host, Sandbox, Display (~1500 lines total)

@@ -1,14 +1,14 @@
-# Helix
+# OpenHelix
 
 **An open, transparent, fully-local agentic system that evolves with you.**
 
-Helix gives an LLM a real computer — a Docker sandbox where it writes and runs bash and python to get things done. Everything runs locally. No data leaves your machine unless you choose to connect an external LLM. The agent learns over time by creating reusable skills and documenting knowledge.
+OpenHelix gives an LLM a real computer — a Docker sandbox where it writes and runs bash and python to get things done. Everything runs locally. No data leaves your machine unless you choose to connect an external LLM. The agent learns over time by creating reusable skills and documenting knowledge.
 
-## Why Helix?
+## Why OpenHelix?
 
 ### Open and Transparent
 
-Every part of Helix is visible and inspectable. The system prompt, the skills, the knowledge library, the full conversation history — nothing is hidden. You can view the exact prompt sent to the LLM at any time (`/view last_prompt`). No hidden tokens, no invisible instructions, no black boxes.
+Every part of OpenHelix is visible and inspectable. The system prompt, the skills, the knowledge library, the full conversation history — nothing is hidden. You can view the exact prompt sent to the LLM at any time (`/view last_prompt`). No hidden tokens, no invisible instructions, no black boxes.
 
 ### Fully Local
 
@@ -21,7 +21,7 @@ Your data stays on your machine. No API keys required for the default local setu
 
 ### Yours to Modify
 
-Helix is a framework, not a service. Fork it, change it, extend it. The codebase follows a simple, clean architecture — every component has one job, every file is readable, every decision is documented.
+OpenHelix is a framework, not a service. Fork it, change it, extend it. The codebase follows a simple, clean architecture — every component has one job, every file is readable, every decision is documented.
 
 ### Extensible Through Skills
 
@@ -64,7 +64,7 @@ Requires Docker.
 # Start Ollama
 ollama serve && ollama pull llama3.1:8b
 
-# Start Helix
+# Start OpenHelix
 helix \
   --endpoint-url http://localhost:11434/v1 \
   --model llama3.1:8b \

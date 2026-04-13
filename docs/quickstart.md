@@ -21,7 +21,7 @@ ollama serve
 ollama pull llama3.1:8b
 ```
 
-### 2. Start Helix
+### 2. Start OpenHelix
 
 ```bash
 helix \
@@ -54,7 +54,7 @@ Any OpenAI-compatible endpoint works — just provide the URL and model name.
 
 ## What Happened
 
-When you started Helix:
+When you started OpenHelix:
 
 1. Docker was checked (required for the sandbox).
 2. Built-in skills were copied into your workspace under `skills/builtin_skills/`.
