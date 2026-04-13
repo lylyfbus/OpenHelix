@@ -22,8 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from helix.core.action import Action, ALLOWED_CORE_ACTIONS, ALLOWED_SUB_ACTIONS
 from helix.core.agent import Agent
 from helix.core.environment import Environment
-from helix.core.state import Turn, format_turn
-from helix.runtime.sandbox import sandbox_executor
+from helix.core.state import Turn
+from helpers import sandbox_executor
 from helix.runtime.loop import run_loop, _delegate
 from helix.runtime.approval import ApprovalPolicy
 
@@ -42,11 +42,11 @@ class InstrumentedCoreModel:
 
     def __init__(self):
         self.call_count = 0
-        self.prompts_received: list[str] = []
+        self.messages_received: list[list[dict]] = []
 
-    def generate(self, prompt, *, stream=False, chunk_callback=None):
+    def generate(self, messages, *, chunk_callback=None):
         self.call_count += 1
-        self.prompts_received.append(prompt)
+        self.messages_received.append(messages)
 
         if self.call_count == 1:
             # Turn 1: Think about the task
@@ -93,11 +93,11 @@ class InstrumentedSubModel:
 
     def __init__(self):
         self.call_count = 0
-        self.prompts_received: list[str] = []
+        self.messages_received: list[list[dict]] = []
 
-    def generate(self, prompt, *, stream=False, chunk_callback=None):
+    def generate(self, messages, *, chunk_callback=None):
         self.call_count += 1
-        self.prompts_received.append(prompt)
+        self.messages_received.append(messages)
 
         if self.call_count == 1:
             # Turn 1: Run the version command
@@ -134,20 +134,21 @@ class SharedInstrumentedModel:
     def __init__(self):
         self.all_calls: list[dict] = []
 
-    def generate(self, prompt, *, stream=False, chunk_callback=None):
+    def generate(self, messages, *, chunk_callback=None):
         call_num = len(self.all_calls) + 1
-        is_sub = "sub-agent" in prompt.lower()
-        caller = "sub-agent" if is_sub else "core-agent"
+        full_text = " ".join(m.get("content", "") for m in messages)
+        is_sub = "sub-agent" in full_text.lower()
+        caller = "sub_agent" if is_sub else "core_agent"
         self.all_calls.append({
             "call_num": call_num,
             "caller": caller,
-            "prompt_snippet": prompt[:200],
-            "prompt_length": len(prompt),
+            "prompt_snippet": full_text[:200],
+            "prompt_length": len(full_text),
         })
 
         if is_sub:
             # Sub-agent calls
-            sub_calls = sum(1 for c in self.all_calls if c["caller"] == "sub-agent")
+            sub_calls = sum(1 for c in self.all_calls if c["caller"] == "sub_agent")
             if sub_calls == 1:
                 return (
                     '<output>'
@@ -166,7 +167,7 @@ class SharedInstrumentedModel:
             )
 
         # Core-agent calls
-        core_calls = sum(1 for c in self.all_calls if c["caller"] == "core-agent")
+        core_calls = sum(1 for c in self.all_calls if c["caller"] == "core_agent")
         if core_calls == 1:
             return (
                 '<output>'
@@ -198,7 +199,7 @@ def _format_history(turns: list[Turn], label: str) -> str:
     lines = [f"\n--- {label} ({len(turns)} turns) ---"]
     for i, t in enumerate(turns):
         prefix = f"  [{i}]"
-        formatted = format_turn(t)
+        formatted = f"[{t.role}] {t.content}"
         # Truncate long content for readability
         if len(formatted) > 300:
             formatted = formatted[:300] + "... (truncated)"
@@ -238,7 +239,7 @@ def run_simulation_scenario_1():
         # Create core agent
         core_agent = Agent(
             core_model,
-            system_prompt="You are the core agent. Manage tasks and delegate when needed.",
+            workspace=workspace,
         )
 
         # Run the loop — pass sub_model for delegation
@@ -248,35 +249,30 @@ def run_simulation_scenario_1():
         # ---- Inspect core-agent observations ----
         print("CORE-AGENT OBSERVATIONS:")
         print(f"  Total model calls: {core_model.call_count}")
-        for i, prompt in enumerate(core_model.prompts_received):
-            print(f"\n  Call {i+1} prompt length: {len(prompt)} chars")
-            # Show key sections of the prompt
-            if "<latest_context>" in prompt:
-                start = prompt.index("<latest_context>")
-                end = prompt.index("</latest_context>") + len("</latest_context>")
-                snippet = prompt[start:end]
-                if len(snippet) > 500:
-                    snippet = snippet[:500] + "..."
-                print(f"  Latest context:\n    {snippet}")
+        for i, msgs in enumerate(core_model.messages_received):
+            total_len = sum(len(m.get("content", "")) for m in msgs)
+            print(f"\n  Call {i+1} messages: {len(msgs)} total_chars: {total_len}")
+            if msgs:
+                last_msg = msgs[-1]
+                snippet = last_msg.get("content", "")[:500]
+                print(f"  Last message ({last_msg['role']}):\n    {snippet}")
 
         # ---- Inspect sub-agent observations ----
         print("\nSUB-AGENT OBSERVATIONS:")
         print(f"  Total model calls: {sub_model.call_count}")
-        for i, prompt in enumerate(sub_model.prompts_received):
-            print(f"\n  Call {i+1} prompt length: {len(prompt)} chars")
-            if "<latest_context>" in prompt:
-                start = prompt.index("<latest_context>")
-                end = prompt.index("</latest_context>") + len("</latest_context>")
-                snippet = prompt[start:end]
-                if len(snippet) > 500:
-                    snippet = snippet[:500] + "..."
-                print(f"  Latest context:\n    {snippet}")
+        for i, msgs in enumerate(sub_model.messages_received):
+            total_len = sum(len(m.get("content", "")) for m in msgs)
+            print(f"\n  Call {i+1} messages: {len(msgs)} total_chars: {total_len}")
+            if msgs:
+                last_msg = msgs[-1]
+                snippet = last_msg.get("content", "")[:500]
+                print(f"  Last message ({last_msg['role']}):\n    {snippet}")
 
         # ---- Inspect full history ----
         print(_format_history(env.full_history, "Core-Agent Full History"))
 
         # ---- Check sub-agent result recorded ----
-        sub_turns = [t for t in env.full_history if t.role == "sub-agent"]
+        sub_turns = [t for t in env.full_history if t.role == "sub_agent"]
         print(f"Sub-agent turns in core history: {len(sub_turns)}")
         for t in sub_turns:
             print(f"  Content: {t.content[:200]}")
@@ -305,14 +301,15 @@ def run_simulation_scenario_1():
         print(f"  full_history entries: {len(raw['full_history'])}")
         print(f"  observation entries: {len(raw['observation'])}")
         print(f"  workflow_summary: '{raw['workflow_summary'][:100] if raw['workflow_summary'] else '(empty)'}'")
-        print(f"  last_prompt length: {len(raw.get('last_prompt', ''))}")
+        last_p = raw.get("last_prompt", "")
+        print(f"  last_prompt entries: {len(last_p) if isinstance(last_p, list) else 'str:' + str(len(last_p))}")
 
         # Verify session reloads correctly
         env2 = Environment(workspace=workspace)
         loaded = env2.load_session(session_path)
         assert loaded, "Session failed to reload"
         assert len(env2.full_history) == len(env.full_history), "History mismatch after reload"
-        sub_turns_reloaded = [t for t in env2.full_history if t.role == "sub-agent"]
+        sub_turns_reloaded = [t for t in env2.full_history if t.role == "sub_agent"]
         assert len(sub_turns_reloaded) == len(sub_turns), "Sub-agent turns lost on reload"
         print("  Session reload verified — all turns preserved")
 
@@ -321,10 +318,10 @@ def run_simulation_scenario_1():
         roles_sequence = [t.role for t in env.full_history]
         print(f"  Turn sequence: {' -> '.join(roles_sequence)}")
 
-        # Expected: user → core-agent(think) → core-agent(delegate) → sub-agent → core-agent(chat)
+        # Expected: user → core_agent(think) → core_agent(delegate) → sub_agent → core_agent(chat)
         assert "user" in roles_sequence, "Missing user turn"
-        assert "core-agent" in roles_sequence, "Missing core-agent turn"
-        assert "sub-agent" in roles_sequence, "Missing sub-agent turn"
+        assert "core_agent" in roles_sequence, "Missing core_agent turn"
+        assert "sub_agent" in roles_sequence, "Missing sub_agent turn"
 
         print(f"\n  Final result: {result[:100]}...")
         print("\n  Scenario 1 PASSED")
@@ -354,7 +351,7 @@ def run_simulation_scenario_2():
 
         agent = Agent(
             model,
-            system_prompt="You are the core agent.",
+            workspace=workspace,
         )
 
         output = StringIO()
@@ -370,7 +367,7 @@ def run_simulation_scenario_2():
         print(_format_history(env.full_history, "Core-Agent Full History"))
 
         # Verify sequence
-        sub_turns = [t for t in env.full_history if t.role == "sub-agent"]
+        sub_turns = [t for t in env.full_history if t.role == "sub_agent"]
         assert len(sub_turns) == 1, f"Expected 1 sub-agent turn, got {len(sub_turns)}"
         assert "successfully" in sub_turns[0].content.lower()
 
@@ -470,59 +467,51 @@ def run_simulation_scenario_5():
 
         agent = Agent(
             core_model,
-            system_prompt="You are the core agent.",
+            workspace=workspace,
         )
 
         output = StringIO()
         run_loop(agent, env, model=sub_model, output=output)
 
         # Detailed breakdown of what each agent saw
-        print("CORE-AGENT - Prompt #1 (before think):")
-        p1 = core_model.prompts_received[0]
-        _print_prompt_sections(p1)
+        print("CORE-AGENT - Messages #1 (before think):")
+        m1 = core_model.messages_received[0]
+        _print_messages_summary(m1)
 
-        print("\nCORE-AGENT - Prompt #2 (before delegate):")
-        p2 = core_model.prompts_received[1]
-        _print_prompt_sections(p2)
+        print("\nCORE-AGENT - Messages #2 (before delegate):")
+        m2 = core_model.messages_received[1]
+        _print_messages_summary(m2)
 
-        print("\nCORE-AGENT - Prompt #3 (after sub-agent returned):")
-        p3 = core_model.prompts_received[2]
-        _print_prompt_sections(p3)
+        print("\nCORE-AGENT - Messages #3 (after sub-agent returned):")
+        m3 = core_model.messages_received[2]
+        _print_messages_summary(m3)
 
-        print("\nSUB-AGENT - Prompt #1 (initial task):")
-        sp1 = sub_model.prompts_received[0]
-        _print_prompt_sections(sp1)
+        print("\nSUB-AGENT - Messages #1 (initial task):")
+        sm1 = sub_model.messages_received[0]
+        _print_messages_summary(sm1)
 
-        print("\nSUB-AGENT - Prompt #2 (after exec result):")
-        sp2 = sub_model.prompts_received[1]
-        _print_prompt_sections(sp2)
+        print("\nSUB-AGENT - Messages #2 (after exec result):")
+        sm2 = sub_model.messages_received[1]
+        _print_messages_summary(sm2)
 
-        # Verify the sub-agent result appears in core-agent's prompt #3
-        assert "sub-agent" in p3.lower() or "sub_agent" in p3.lower(), \
-            "Core-agent prompt #3 should contain sub-agent result"
+        # Verify the sub-agent result appears in core-agent's messages #3
+        m3_text = " ".join(m.get("content", "") for m in m3)
+        assert "sub-agent" in m3_text.lower() or "sub_agent" in m3_text.lower(), \
+            "Core-agent messages #3 should contain sub-agent result"
 
         print("\n  Scenario 5 PASSED")
 
 
-def _print_prompt_sections(prompt: str):
-    """Extract and print the key sections of a prompt."""
-    sections = {
-        "workflow_summary": ("<workflow_summary>", "</workflow_summary>"),
-        "workflow_history": ("<workflow_history>", "</workflow_history>"),
-        "latest_context": ("<latest_context>", "</latest_context>"),
-    }
-    for name, (open_tag, close_tag) in sections.items():
-        if open_tag in prompt:
-            start = prompt.index(open_tag)
-            end = prompt.index(close_tag) + len(close_tag)
-            content = prompt[start:end]
-            if len(content) > 400:
-                content = content[:400] + "\n    ... (truncated)"
-            print(f"  [{name}]")
-            for line in content.split("\n"):
-                print(f"    {line}")
-        else:
-            print(f"  [{name}] (not present)")
+def _print_messages_summary(messages: list[dict]):
+    """Print a summary of a chat messages array."""
+    for i, msg in enumerate(messages):
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        preview = content[:300].replace("\n", "\n    ")
+        if len(content) > 300:
+            preview += "\n    ... (truncated)"
+        print(f"  [{i}] {role}:")
+        print(f"    {preview}")
 
 
 # =========================================================================== #

@@ -16,8 +16,7 @@ SCRIPT_PATH = (
     ROOT
     / "helix"
     / "builtin_skills"
-    / "all-agents"
-    / "skill-creation"
+    / "create-skill"
     / "scripts"
     / "skill_creation.py"
 )
@@ -41,7 +40,7 @@ def test_parse_args_defaults_to_multi():
             "skill_creation.py",
             "--action", "scaffold",
             "--skill-id", "demo-skill",
-            "--scope", "all-agents",
+            "--scope", "builtin_skills",
         ]
         args = skill_creation.parse_args()
         assert args.script_mode == "multi"
@@ -56,7 +55,7 @@ def test_multi_scaffold_creates_phase_scripts():
         out = skill_creation.run_scaffold(
             workspace=workspace,
             skill_id="demo-skill",
-            scope="all-agents",
+            scope="builtin_skills",
             description="Demo multi-step skill",
             overwrite=False,
             script_mode="multi",
@@ -65,7 +64,7 @@ def test_multi_scaffold_creates_phase_scripts():
         )
         assert out["status"] == "ok"
 
-        skill_dir = workspace / "skills" / "all-agents" / "demo-skill"
+        skill_dir = workspace / "skills" / "builtin_skills" / "demo-skill"
         expected_files = [
             skill_dir / "SKILL.md",
             skill_dir / "scripts" / "gather_context.py",
@@ -85,7 +84,7 @@ def test_multi_scaffold_creates_phase_scripts():
         validate = skill_creation.run_validate(
             workspace=workspace,
             skill_id="demo-skill",
-            scope="all-agents",
+            scope="builtin_skills",
         )
         assert validate["status"] == "ok"
         print("  multi scaffold creates phase scripts OK")
@@ -94,7 +93,7 @@ def test_multi_scaffold_creates_phase_scripts():
 def test_validate_multi_requires_multiple_scripts():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        skill_dir = workspace / "skills" / "all-agents" / "partial-skill"
+        skill_dir = workspace / "skills" / "builtin_skills" / "partial-skill"
         scripts_dir = skill_dir / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,7 +101,7 @@ def test_validate_multi_requires_multiple_scripts():
         skill_md.write_text(
             skill_creation._skill_template(
                 skill_id="partial-skill",
-                scope="all-agents",
+                scope="builtin_skills",
                 skill_name="Partial Skill",
                 description="Partial multi-step skill",
                 handler_path="",
@@ -124,7 +123,7 @@ def test_validate_multi_requires_multiple_scripts():
         out = skill_creation.run_validate(
             workspace=workspace,
             skill_id="partial-skill",
-            scope="all-agents",
+            scope="builtin_skills",
         )
         assert out["status"] == "error"
         assert "multi_mode_requires_multiple_scripts" in out["skill_created/updated"]
@@ -137,7 +136,7 @@ def test_single_scaffold_validates():
         out = skill_creation.run_scaffold(
             workspace=workspace,
             skill_id="single-backend-skill",
-            scope="all-agents",
+            scope="builtin_skills",
             description="Single backend-owned capability skill",
             overwrite=False,
             script_mode="single",
@@ -149,7 +148,7 @@ def test_single_scaffold_validates():
         validate = skill_creation.run_validate(
             workspace=workspace,
             skill_id="single-backend-skill",
-            scope="all-agents",
+            scope="builtin_skills",
         )
         assert validate["status"] == "ok"
         print("  single scaffold validates OK")
@@ -188,28 +187,28 @@ def test_bootstrapped_media_skills_validate():
         gen_validate = skill_creation.run_validate(
             workspace=workspace,
             skill_id="generate-image",
-            scope="all-agents",
+            scope="builtin_skills",
         )
         assert gen_validate["status"] == "ok", gen_validate["skill_created/updated"]
 
         audio_validate = skill_creation.run_validate(
             workspace=workspace,
             skill_id="generate-audio",
-            scope="all-agents",
+            scope="builtin_skills",
         )
         assert audio_validate["status"] == "ok", audio_validate["skill_created/updated"]
 
         video_validate = skill_creation.run_validate(
             workspace=workspace,
             skill_id="generate-video",
-            scope="all-agents",
+            scope="builtin_skills",
         )
         assert video_validate["status"] == "ok", video_validate["skill_created/updated"]
 
         analyze_validate = skill_creation.run_validate(
             workspace=workspace,
             skill_id="analyze-image",
-            scope="all-agents",
+            scope="builtin_skills",
         )
         assert analyze_validate["status"] == "ok", analyze_validate["skill_created/updated"]
         print("  bootstrapped media skills validate OK")

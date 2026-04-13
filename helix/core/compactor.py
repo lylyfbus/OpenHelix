@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .state import Turn, format_turn
+from .state import Turn
 
 
 # --------------------------------------------------------------------------- #
@@ -64,7 +64,7 @@ class Compactor:
     an updated compact summary using the LLM.
 
     Args:
-        model: Any object satisfying the ModelProvider protocol.
+        model: An ``LLMProvider`` instance.
     """
 
     def __init__(self, model: Any) -> None:
@@ -76,21 +76,23 @@ class Compactor:
         Raises:
             CompactionError: If all retries fail.
         """
-        history_text = "\n".join(format_turn(t) for t in old_turns)
-        prompt = (
-            f"{COMPACTOR_PROMPT}\n\n"
-            f"<workflow_summary>\n"
-            f"{current_summary if current_summary else '(empty)'}\n"
-            f"</workflow_summary>\n\n"
-            f"<workflow_history>\n"
-            f"{history_text}\n"
-            f"</workflow_history>"
-        )
+        history_text = "\n".join(f"[{t.role}] {t.content}" for t in old_turns)
+        messages = [
+            {"role": "system", "content": COMPACTOR_PROMPT},
+            {"role": "user", "content": (
+                f"<workflow_summary>\n"
+                f"{current_summary if current_summary else '(empty)'}\n"
+                f"</workflow_summary>\n\n"
+                f"<workflow_history>\n"
+                f"{history_text}\n"
+                f"</workflow_history>"
+            )},
+        ]
 
         last_error = ""
         for attempt in range(3):
             try:
-                result = self._model.generate(prompt, stream=False)
+                result = self._model.generate(messages)
                 if isinstance(result, str) and result.strip():
                     return result.strip()
                 last_error = "LLM returned empty compaction result"

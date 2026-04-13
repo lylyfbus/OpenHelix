@@ -138,7 +138,7 @@ class StreamingDisplay:
         self._current_name = "agent"
 
     def __call__(self, token: str) -> None:
-        """Called per token during model.generate(stream=True)."""
+        """Called per token during model.generate()."""
         self._accumulated += token
         response = extract_streaming_response(self._accumulated)
         if response is None:

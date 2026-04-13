@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helix.core.action import Action
 from helix.core.environment import Environment
-from helix.runtime.sandbox import docker_is_available, sandbox_executor
+from helix.runtime.host import docker_is_available
+from helpers import sandbox_executor
 from helix.core.state import Turn
 from helix.runtime.approval import ApprovalPolicy
 from helix.runtime.display import TURN_SEPARATOR
@@ -300,7 +301,7 @@ def test_approval_prompt_shows_timeout_seconds_and_job_name():
         payload={
             "job_name": "prepare-video-model-retry",
             "code_type": "python",
-            "script_path": "skills/all-agents/generate-video/scripts/prepare_model.py",
+            "script_path": "skills/builtin_skills/generate-video/scripts/prepare_model.py",
             "script_args": ["--timeout", "1200"],
             "timeout_seconds": 1800,
         },
@@ -311,7 +312,7 @@ def test_approval_prompt_shows_timeout_seconds_and_job_name():
 
     output = captured.getvalue()
     assert "Job Name: prepare-video-model-retry" in output
-    assert "Script Path: skills/all-agents/generate-video/scripts/prepare_model.py" in output
+    assert "Script Path: skills/builtin_skills/generate-video/scripts/prepare_model.py" in output
     assert "Args: ['--timeout', '1200']" in output
     assert "Timeout Seconds: 1800" in output
     print("  Approval prompt shows full exec payload OK")
@@ -333,7 +334,7 @@ def test_approval_policy_exact_match_includes_timeout_seconds():
         type="exec",
         payload={
             "code_type": "python",
-            "script_path": "skills/all-agents/generate-video/scripts/prepare_model.py",
+            "script_path": "skills/builtin_skills/generate-video/scripts/prepare_model.py",
             "script_args": ["--timeout", "1200"],
             "timeout_seconds": 1800,
         },
@@ -345,7 +346,7 @@ def test_approval_policy_exact_match_includes_timeout_seconds():
         type="exec",
         payload={
             "code_type": "python",
-            "script_path": "skills/all-agents/generate-video/scripts/prepare_model.py",
+            "script_path": "skills/builtin_skills/generate-video/scripts/prepare_model.py",
             "script_args": ["--timeout", "1200"],
             "timeout_seconds": 2400,
         },
@@ -364,7 +365,7 @@ def test_format_agent_record_includes_all_exec_payload_fields():
         payload={
             "job_name": "prepare-video-model-retry",
             "code_type": "python",
-            "script_path": "skills/all-agents/generate-video/scripts/prepare_model.py",
+            "script_path": "skills/builtin_skills/generate-video/scripts/prepare_model.py",
             "script_args": ["--timeout", "1200"],
             "timeout_seconds": 1800,
             "retry_count": 1,

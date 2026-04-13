@@ -15,7 +15,6 @@ SCRIPT_PATH = (
     ROOT
     / "helix"
     / "builtin_skills"
-    / "all-agents"
     / "analyze-image"
     / "scripts"
     / "analyze_image.py"

@@ -1,0 +1,39 @@
+{
+  "backend": "mlx",
+  "source": {
+    "repo_id": "uqer1244/MLX-z-image"
+  },
+  "download_manifest": {
+    "include": [
+      "model_index.json",
+      "scheduler/*",
+      "tokenizer/*",
+      "text_encoder/*",
+      "transformer/*",
+      "vae/*"
+    ],
+    "exclude": [],
+    "required": [
+      "model_index.json",
+      "scheduler/scheduler_config.json",
+      "tokenizer/tokenizer_config.json",
+      "text_encoder/config.json",
+      "text_encoder/*.safetensors",
+      "transformer/config.json",
+      "transformer/*.safetensors",
+      "vae/config.json",
+      "vae/*.safetensors"
+    ]
+  },
+  "sources": {
+    "skill_name": "generate-image",
+    "repo": "https://raw.githubusercontent.com/uqer1244/MLX_z-image",
+    "commit": "b508c3555cd49b5fb5afd3434053a55d1710c129",
+    "files": [
+      "lora_utils.py",
+      "mlx_pipeline.py",
+      "mlx_text_encoder.py",
+      "mlx_z_image.py"
+    ]
+  }
+}

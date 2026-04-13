@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Callable, Optional, Union
-
+from typing import Callable, Optional
 
 from .action import Action
 from .compactor import Compactor, CompactionError
@@ -28,7 +27,7 @@ class ExecutionInterrupted(RuntimeError):
 # Hook signatures
 # --------------------------------------------------------------------------- #
 
-ApprovalResult = Union[bool, Turn]
+ApprovalResult = bool | Turn
 OnBeforeExecute = Callable[["Environment", Action], ApprovalResult]
 
 # Sandbox executor signature: (payload, workspace) -> Turn
@@ -112,7 +111,7 @@ class Environment:
         """
         available = self.token_limit
 
-        observation_tokens = _estimate_tokens_for_turns(self.observation)
+        observation_tokens = self._estimate_tokens_for_turns(self.observation)
         if observation_tokens <= available:
             return State(
                 observation=list(self.observation),
@@ -175,8 +174,8 @@ class Environment:
     def save_session(self, session_path: Path, *, extra_fields: dict | None = None) -> None:
         """Persist session state to disk."""
         state = {
-            "full_history": [_turn_to_dict(t) for t in self.full_history],
-            "observation": [_turn_to_dict(t) for t in self.observation],
+            "full_history": [self._turn_to_dict(t) for t in self.full_history],
+            "observation": [self._turn_to_dict(t) for t in self.observation],
             "workflow_summary": self.workflow_summary,
         }
         if extra_fields:
@@ -198,42 +197,21 @@ class Environment:
         if not isinstance(raw, dict):
             return False
 
-        self.full_history = [_dict_to_turn(d) for d in raw.get("full_history", [])]
-        self.observation = [_dict_to_turn(d) for d in raw.get("observation", [])]
+        self.full_history = [self._dict_to_turn(d) for d in raw.get("full_history", [])]
+        self.observation = [self._dict_to_turn(d) for d in raw.get("observation", [])]
         self.workflow_summary = raw.get("workflow_summary", "")
         return True
 
-# --------------------------------------------------------------------------- #
-# Serialization helpers
-# --------------------------------------------------------------------------- #
+    # ----- Internal helpers ------------------------------------------------- #
 
+    @staticmethod
+    def _turn_to_dict(turn: Turn) -> dict:
+        return {"role": turn.role, "content": turn.content, "timestamp": turn.timestamp}
 
-def _turn_to_dict(turn: Turn) -> dict:
-    return {
-        "role": turn.role,
-        "content": turn.content,
-        "timestamp": turn.timestamp,
-    }
+    @staticmethod
+    def _dict_to_turn(d: dict) -> Turn:
+        return Turn(role=d.get("role", "unknown"), content=d.get("content", ""), timestamp=d.get("timestamp", ""))
 
-
-def _dict_to_turn(d: dict) -> Turn:
-    return Turn(
-        role=d.get("role", "unknown"),
-        content=d.get("content", ""),
-        timestamp=d.get("timestamp", ""),
-    )
-
-
-# --------------------------------------------------------------------------- #
-# Token estimation
-# --------------------------------------------------------------------------- #
-
-
-def _estimate_tokens(text: str) -> int:
-    """Rough token estimate (4 chars ≈ 1 token)."""
-    return len(text) // 4
-
-
-def _estimate_tokens_for_turns(turns: list[Turn]) -> int:
-    """Estimate tokens across a list of turns."""
-    return sum(_estimate_tokens(t.content) + 20 for t in turns)  # 20 for role/ts overhead
+    @staticmethod
+    def _estimate_tokens_for_turns(turns: list[Turn]) -> int:
+        return sum(len(t.content) // 4 + 20 for t in turns)

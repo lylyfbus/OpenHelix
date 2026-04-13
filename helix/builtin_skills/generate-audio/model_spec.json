@@ -1,0 +1,19 @@
+{
+  "backend": "pytorch",
+  "source": {
+    "repo_id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+  },
+  "download_manifest": {
+    "include": [],
+    "exclude": [],
+    "required": [
+      "config.json",
+      "**/*.json",
+      "**/*.safetensors"
+    ]
+  },
+  "prerequisites": {
+    "host_binaries": ["sox"],
+    "install_hint": "Install it on the host with `brew install sox`."
+  }
+}

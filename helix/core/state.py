@@ -44,10 +44,4 @@ class State:
     workflow_summary: str = ""
 
 
-def format_turn(turn: Turn) -> str:
-    """Format a turn into the standard text representation.
 
-    This is the single canonical format used in prompts, compaction,
-    and session views.
-    """
-    return f"[{turn.timestamp}] {turn.role}> {turn.content}"

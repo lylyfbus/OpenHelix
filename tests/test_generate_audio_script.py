@@ -13,7 +13,6 @@ SCRIPT_PATH = (
     ROOT
     / "helix"
     / "builtin_skills"
-    / "all-agents"
     / "generate-audio"
     / "scripts"
     / "generate_audio.py"

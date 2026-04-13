@@ -19,21 +19,21 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helix.core.agent import _load_skills as load_skills
-from helix.core.agent import _load_knowledge_catalog as load_knowledge_catalog
 from helix.core.agent import _build_system_prompt
 from helix.core.action import Action, parse_action
 from helix.core.environment import Environment
 from helix.core.agent import Agent
 from helix.core.state import Turn
 from helix.runtime.loop import run_loop
-from helix.runtime.sandbox import docker_is_available, sandbox_executor
+from helix.runtime.host import docker_is_available
+from helpers import sandbox_executor
 from helix.runtime.approval import ApprovalPolicy
 from helix.runtime.host import RuntimeHost
 
 class _FakeDockerExecutor:
     approval_profile = "docker-online-rw-workspace-v1:test"
 
-    def __init__(self, workspace: Path, *, session_id: str | None = None):
+    def __init__(self, workspace: Path, *, session_id: str | None = None, **kwargs):
         self.workspace = workspace
         self.session_id = session_id
 
@@ -45,6 +45,7 @@ class _FakeDockerExecutor:
 
     def shutdown(self) -> None:
         pass
+
 
     def status_fields(self) -> dict[str, str]:
         return {"sandbox_backend": "docker", "docker_image": "fake-image"}
@@ -59,12 +60,19 @@ BUILTIN_SKILLS = WORKSPACE / "helix" / "builtin_skills"
 
 
 def _make_host(workspace: Path, **kwargs) -> RuntimeHost:
-    params = {"workspace": workspace, "session_id": "skills-01"}
+    params = {
+        "workspace": workspace,
+        "session_id": "skills-01",
+        "endpoint_url": "http://localhost:11434/v1",
+        "model": "llama3.1:8b",
+    }
     params.update(kwargs)
+
     with patch("helix.runtime.host.docker_is_available", return_value=(True, "")):
-        with patch("helix.runtime.host.DockerSandboxExecutor", _FakeDockerExecutor):
-            with patch("helix.runtime.host.local_model_service_supported", return_value=False):
-                return RuntimeHost(**params)
+        with patch("helix.services.searxng.discover", return_value=None):
+            with patch("helix.services.local_model_service.discover", return_value=None):
+                with patch("helix.runtime.host.DockerSandboxExecutor", _FakeDockerExecutor):
+                    return RuntimeHost(**params)
 
 
 def _docker_ready() -> bool:
@@ -83,28 +91,27 @@ def _docker_ready() -> bool:
 def test_real_skill_loading():
     """Verify that the skill loader correctly reads skills from builtin_skills."""
     skills = load_skills(BUILTIN_SKILLS)
-    skill_ids = {s["skill_id"] for s in skills}
+    paths = {s["path"] for s in skills}
 
     # Should find all non-loader built-in skills.
-    assert "search-online-context" in skill_ids, f"Missing search-online-context, got: {skill_ids}"
-    assert "generate-image" in skill_ids
-    assert "generate-audio" in skill_ids
-    assert "generate-video" in skill_ids
-    assert "analyze-image" in skill_ids
-    assert "documentation-distillation" in skill_ids
-    assert "file-based-planning" in skill_ids
-    assert "skill-creation" in skill_ids
-    assert "brainstorming" in skill_ids
+    assert any("search-online-context" in p for p in paths), f"Missing search-online-context, got: {paths}"
+    assert any("generate-image" in p for p in paths)
+    assert any("generate-audio" in p for p in paths)
+    assert any("generate-video" in p for p in paths)
+    assert any("analyze-image" in p for p in paths)
+    assert any("create-document" in p for p in paths)
+    assert any("file-based-planning" in p for p in paths)
+    assert any("create-skill" in p for p in paths)
+    assert any("brainstorming" in p for p in paths)
 
-    # Loaders should be excluded by the skill loader (they're handled separately)
-    assert "load-skill" not in skill_ids
-    assert "load-knowledge-docs" not in skill_ids
+    # retrieve-knowledge replaces load-knowledge-docs
+    assert any("retrieve-knowledge" in p for p in paths)
 
     # Verify metadata quality
     for skill in skills:
-        assert skill["skill_id"], "Empty skill_id"
-        assert skill["scope"] == "all-agents", f"Unexpected scope: {skill['scope']}"
-        assert skill["name"], f"Empty name for {skill['skill_id']}"
+        assert skill["name"], f"Empty name for {skill['path']}"
+        assert skill["path"], "Empty path"
+        assert skill["description"] is not None
 
     print(f"  Real skill loading OK ({len(skills)} skills found)")
 
@@ -112,60 +119,22 @@ def test_real_skill_loading():
 def test_real_skill_metadata_fields():
     """Verify specific skill metadata is correctly extracted."""
     skills = load_skills(BUILTIN_SKILLS)
-    skill_map = {s["skill_id"]: s for s in skills}
+    skill_map = {s["path"].rsplit("/", 1)[-1]: s for s in skills}
 
     # search-online-context
     search = skill_map["search-online-context"]
-    assert "search_searxng.py" in search["handler"]
     assert "search" in search["name"].lower()
     assert search["description"]
 
-    # brainstorming — no handler
+    # brainstorming
     bs = skill_map["brainstorming"]
-    assert bs["handler"] == ""  # no handler specified
     assert bs["description"]
 
-    # file-based-planning — multi-script skill
+    # file-based-planning
     fbp = skill_map["file-based-planning"]
-    assert "init_planning.py" in fbp["handler"]
+    assert fbp["description"]
 
     print("  Real skill metadata fields OK")
-
-
-def _create_workspace_knowledge(workspace: Path) -> None:
-    """Create a minimal knowledge catalog inside a temp workspace."""
-    docs_root = workspace / "knowledge" / "docs"
-    index_root = workspace / "knowledge" / "index"
-    docs_root.mkdir(parents=True, exist_ok=True)
-    index_root.mkdir(parents=True, exist_ok=True)
-
-    doc_id = "doc_c83ff4bad5ca"
-    (docs_root / f"{doc_id}.md").write_text(
-        "# Schema test\n\nKnowledge fixture for integration tests.\n",
-        encoding="utf-8",
-    )
-    catalog = [{
-        "title": "Schema test",
-        "summary": "Knowledge fixture used to verify runtime knowledge catalog loading.",
-        "path": f"knowledge/docs/{doc_id}.md",
-        "tags": ["test", "schema"],
-    }]
-    (index_root / "catalog.json").write_text(
-        json.dumps(catalog, indent=2),
-        encoding="utf-8",
-    )
-
-
-def test_workspace_knowledge_loading():
-    """Verify knowledge catalog loads from a runtime workspace layout."""
-    with tempfile.TemporaryDirectory() as td:
-        workspace = Path(td)
-        _create_workspace_knowledge(workspace)
-        catalog = load_knowledge_catalog(workspace / "knowledge")
-        assert len(catalog) == 1
-        assert catalog[0]["path"] == "knowledge/docs/doc_c83ff4bad5ca.md"
-        assert catalog[0]["title"] == "Schema test"
-        print(f"  Workspace knowledge loading OK ({len(catalog)} docs)")
 
 
 # =========================================================================== #
@@ -177,15 +146,15 @@ def test_bootstrap_skills():
     """Verify that RuntimeHost bootstraps all packaged skills into a fresh workspace."""
     with tempfile.TemporaryDirectory() as td:
         host = _make_host(Path(td))
-        ws_skills = Path(td) / "skills" / "all-agents"
+        ws_skills = Path(td) / "skills" / "builtin_skills"
         skill_dirs = sorted(p.name for p in ws_skills.iterdir() if p.is_dir())
-        assert len(skill_dirs) == 11, f"Expected 11, got {len(skill_dirs)}: {skill_dirs}"
+        assert len(skill_dirs) == 12, f"Expected 12, got {len(skill_dirs)}: {skill_dirs}"
         assert "search-online-context" in skill_dirs
         assert "generate-image" in skill_dirs
         assert "generate-audio" in skill_dirs
         assert "generate-video" in skill_dirs
         assert "analyze-image" in skill_dirs
-        assert "load-skill" in skill_dirs
+        assert "retrieve-knowledge" in skill_dirs
         print(f"  Bootstrap skills OK ({len(skill_dirs)} skills synced)")
 
 
@@ -202,8 +171,7 @@ def test_bootstrapped_prompt_builder():
         assert "generate-audio" in prompt
         assert "generate-video" in prompt
         assert "analyze-image" in prompt
-        assert "load-skill" in prompt
-        assert "load-knowledge-docs" not in prompt
+        assert "retrieve-knowledge" in prompt
 
         print(f"  Bootstrapped prompt builder OK ({len(prompt)} chars)")
 
@@ -211,7 +179,7 @@ def test_bootstrapped_prompt_builder():
 def test_bootstrap_prunes_renamed_packaged_skills_but_keeps_user_skills():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        skills_root = workspace / "skills" / "all-agents"
+        skills_root = workspace / "skills" / "builtin_skills"
         legacy_generation_skill = skills_root / "generate-image-from-pytorch"
         legacy_analysis_skill = skills_root / "analyze-image-from-ollama"
         user_skill = skills_root / "user-custom-skill"
@@ -226,8 +194,8 @@ def test_bootstrap_prunes_renamed_packaged_skills_but_keeps_user_skills():
         manifest_path.write_text(
             json.dumps(
                 [
-                    "all-agents/generate-image-from-pytorch",
-                    "all-agents/analyze-image-from-ollama",
+                    "generate-image-from-pytorch",
+                    "analyze-image-from-ollama",
                 ],
                 indent=2,
             ),
@@ -260,7 +228,7 @@ def test_full_pipeline_with_skill_exec():
         call_count = [0]
 
         class SkillAwareModel:
-            def generate(self, prompt, *, stream=False, chunk_callback=None):
+            def generate(self, messages, *, chunk_callback=None):
                 call_count[0] += 1
                 if call_count[0] == 1:
                     return (
@@ -287,7 +255,7 @@ def test_full_pipeline_with_skill_exec():
 
         agent = Agent(
             SkillAwareModel(),
-            system_prompt=system_prompt,
+            workspace=workspace,
         )
 
         result = run_loop(agent, env, output=sys.stderr)
@@ -304,17 +272,14 @@ def test_full_pipeline_with_skill_exec():
     print("  Full pipeline with skill exec OK")
 
 
-def test_load_skill_script_exists():
-    """Verify that built-in loader scripts exist in the builtin_skills tree."""
-    load_skill_path = BUILTIN_SKILLS / "all-agents" / "load-skill" / "scripts" / "load_skill.py"
-    assert load_skill_path.exists(), f"load-skill script not found at {load_skill_path}"
+def test_builtin_skill_files_exist():
+    """Verify that key built-in skills exist."""
+    retrieve_knowledge = BUILTIN_SKILLS / "retrieve-knowledge" / "SKILL.md"
+    assert retrieve_knowledge.exists(), f"retrieve-knowledge SKILL.md not found at {retrieve_knowledge}"
 
-    load_knowledge_path = (
-        BUILTIN_SKILLS / "all-agents" / "load-knowledge-docs"
-        / "scripts" / "load_knowledge_docs.py"
-    )
-    assert load_knowledge_path.exists(), f"load-knowledge-docs script not found at {load_knowledge_path}"
-    print("  Built-in loader scripts exist OK")
+    documentation = BUILTIN_SKILLS / "create-document" / "SKILL.md"
+    assert documentation.exists(), f"documentation-distillation SKILL.md not found at {documentation}"
+    print("  Built-in skill files exist OK")
 
 
 # =========================================================================== #
@@ -327,15 +292,12 @@ if __name__ == "__main__":
     test_real_skill_loading()
     test_real_skill_metadata_fields()
 
-    print("\n=== Knowledge Integration ===")
-    test_workspace_knowledge_loading()
-
     print("\n=== Bootstrap ===")
     test_bootstrap_skills()
     test_bootstrapped_prompt_builder()
 
     print("\n=== Full Pipeline ===")
     test_full_pipeline_with_skill_exec()
-    test_load_skill_script_exists()
+    test_builtin_skill_files_exist()
 
     print("\n✅ All Phase 4 tests passed!")

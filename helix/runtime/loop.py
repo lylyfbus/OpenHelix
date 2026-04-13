@@ -55,7 +55,7 @@ def run_loop(
     """
     consecutive_failures = 0
 
-    for turn_num in range(max_turns):
+    for _ in range(max_turns):
         # 1. Build state from environment (compacts if needed)
         try:
             state = env.build_state()
@@ -69,11 +69,10 @@ def run_loop(
 
         # 2. Agent decides
         if on_turn_start:
-            on_turn_start(agent.name)
+            on_turn_start(agent.role)
         try:
             action = agent.act(
                 state,
-                stream=bool(on_token_chunk),
                 chunk_callback=on_token_chunk,
             )
             consecutive_failures = 0
@@ -98,17 +97,14 @@ def run_loop(
         if on_turn_end:
             on_turn_end()
 
-        # 4. Print action details (response was already streamed)
-        _print(output, action=action)
-
-        # 5. Record agent turn with full action details
+        # 4. Record agent turn with full action details
         record_content = _format_agent_record(action)
         env.record(Turn(
-            role=agent.name,
+            role=agent.role,
             content=record_content,
         ))
 
-        # 6. Execute action
+        # 5. Execute action
         if action.type == "chat":
             # Done — return to caller
             return action.response
@@ -139,7 +135,7 @@ def run_loop(
             )
             result = _delegate(action, env, model)
             env.record(Turn(
-                role="sub-agent",
+                role="sub_agent",
                 content=result,
             ))
 
@@ -147,6 +143,7 @@ def run_loop(
     msg = "Loop ended: maximum turns reached."
     _print(output, f"runtime> {msg}\n", add_separator=True)
     return msg
+
 
 # --------------------------------------------------------------------------- #
 # Sub-agent delegation
@@ -182,12 +179,11 @@ def _delegate(action: Action, env: Environment, model: Any) -> str:
     seed_content = objective
     if context:
         seed_content += f"\n\nContext:\n{context}"
-    sub_env.record(Turn(role="core-agent", content=seed_content))
+    sub_env.record(Turn(role="user", content=seed_content))
 
     # Build sub-agent (cannot delegate further)
     sub_agent = Agent(
         model,
-        name="sub-agent",
         workspace=env.workspace,
         role="sub_agent",
         sub_agent_role=role,
@@ -197,21 +193,15 @@ def _delegate(action: Action, env: Environment, model: Any) -> str:
     return run_loop(sub_agent, sub_env)
 
 
-# --------------------------------------------------------------------------- #
-def _print(output: TextIO, text: str = "", *, action: Action | None = None, add_separator: bool = False) -> None:
-    """Print to the output stream immediately (unbuffered).
-
-    Action metadata is not printed to the requester-facing UI.
-    The full action details are still recorded into workflow history.
-    """
-    if "\n" not in text and action is None:
-        pass
-    elif text:
-        if add_separator:
-            write_framed_text(text, output)
-        else:
-            output.write(text)
-            output.flush()
+def _print(output: TextIO, text: str, *, add_separator: bool = False) -> None:
+    """Print to the output stream."""
+    if not text:
+        return
+    if add_separator:
+        write_framed_text(text, output)
+    else:
+        output.write(text)
+        output.flush()
 
 # --------------------------------------------------------------------------- #
 # Agent record formatting

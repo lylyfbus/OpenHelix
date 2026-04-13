@@ -17,7 +17,8 @@ from helix.core.agent import Agent
 from helix.core.environment import Environment
 from helix.runtime.loop import run_loop, _delegate
 from helix.core.state import Turn
-from helix.runtime.sandbox import docker_is_available, sandbox_executor
+from helix.runtime.host import docker_is_available
+from helpers import sandbox_executor
 from helix.runtime.approval import ApprovalPolicy
 from helix.runtime.display import TURN_SEPARATOR
 
@@ -41,7 +42,7 @@ class CoreAgentModel:
     def __init__(self):
         self.call_count = 0
 
-    def generate(self, prompt, *, stream=False, chunk_callback=None):
+    def generate(self, messages, *, chunk_callback=None):
         self.call_count += 1
         if self.call_count == 1:
             # First turn: delegate
@@ -71,7 +72,7 @@ class SubAgentModel:
     def __init__(self):
         self.call_count = 0
 
-    def generate(self, prompt, *, stream=False, chunk_callback=None):
+    def generate(self, messages, *, chunk_callback=None):
         self.call_count += 1
         return (
             '<output>'
@@ -91,10 +92,11 @@ class SharedModel:
     def __init__(self):
         self.calls = []
 
-    def generate(self, prompt, *, stream=False, chunk_callback=None):
-        self.calls.append(prompt[:100])  # track calls
+    def generate(self, messages, *, chunk_callback=None):
+        full_text = " ".join(m.get("content", "") for m in messages)
+        self.calls.append(full_text[:100])  # track calls
 
-        if "sub-agent" in prompt.lower():
+        if "sub-agent" in full_text.lower():
             # Sub-agent call
             return (
                 '<output>'
@@ -207,7 +209,7 @@ def test_full_delegation_loop():
 
         agent = Agent(
             model,
-            system_prompt="You are the core agent.",
+            workspace=workspace,
         )
 
         output = StringIO()
@@ -221,7 +223,7 @@ def test_full_delegation_loop():
         assert "sub-agent>" not in output.getvalue()
 
         # Verify sub_agent turn appears in history
-        sub_turns = [t for t in env.full_history if t.role == "sub-agent"]
+        sub_turns = [t for t in env.full_history if t.role == "sub_agent"]
         assert len(sub_turns) == 1
         assert "Guido" in sub_turns[0].content
 
@@ -237,7 +239,7 @@ def test_delegate_with_exec_in_sub_agent():
         def __init__(self):
             self.count = 0
 
-        def generate(self, prompt, **kwargs):
+        def generate(self, messages, **kwargs):
             self.count += 1
             if self.count == 1:
                 return (

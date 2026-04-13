@@ -11,7 +11,6 @@ SKILL_DIR = (
     ROOT
     / "helix"
     / "builtin_skills"
-    / "all-agents"
     / "search-online-context"
 )
 

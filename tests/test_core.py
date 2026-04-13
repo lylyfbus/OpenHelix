@@ -192,7 +192,7 @@ def test_environment_build_state():
 
 def test_environment_compaction():
     class CompactorModel:
-        def generate(self, prompt, *, stream=False, chunk_callback=None):
+        def generate(self, messages, *, chunk_callback=None):
             return "## Session Goal\nTest session\n## Current Status\nCompacted."
 
     with tempfile.TemporaryDirectory() as td:
@@ -210,7 +210,7 @@ def test_environment_compaction():
         print("  Compaction OK")
 
 
-def test_agent_prompt_keeps_summary_separate_from_recent_history():
+def test_agent_messages_keeps_summary_in_system_and_turns_in_conversation():
     state = State(
         observation=[
             Turn(role="runtime", content="Job succeeded."),
@@ -218,14 +218,20 @@ def test_agent_prompt_keeps_summary_separate_from_recent_history():
         ],
         workflow_summary="## Summary\nCompacted",
     )
-    agent = Agent(type("MockModel", (), {"generate": lambda self, *args, **kwargs: ""})(), system_prompt="test")
+    with tempfile.TemporaryDirectory() as td:
+        agent = Agent(type("MockModel", (), {"generate": lambda self, *args, **kwargs: ""})(), workspace=Path(td))
 
-    prompt = agent._build_prompt(state)
+        messages = agent._build_messages(state)
 
-    assert "<workflow_summary>\n## Summary\nCompacted\n</workflow_summary>" in prompt
-    assert "runtime> Job succeeded." in prompt
-    assert "what now?" in prompt
-    print("  Prompt keeps summary separate from recent history OK")
+        # System message contains the workflow summary
+        assert messages[0]["role"] == "system"
+        assert "## Summary\nCompacted" in messages[0]["content"]
+        # Conversation turns are present with correct roles
+        contents = [m["content"] for m in messages[1:]]
+        all_content = "\n".join(contents)
+        assert "Job succeeded." in all_content
+        assert "what now?" in all_content
+        print("  Messages keep summary in system and turns in conversation OK")
 
 
 def test_environment_compaction_error():
@@ -272,12 +278,12 @@ def test_run_loop_compaction_failure_is_ui_only():
         def __init__(self) -> None:
             self.calls = 0
 
-        def generate(self, prompt, *, stream=False, chunk_callback=None):
+        def generate(self, messages, *, chunk_callback=None):
             self.calls += 1
             raise RemoteDisconnected("compactor closed connection")
 
     class UnusedAgentModel:
-        def generate(self, prompt, *, stream=False, chunk_callback=None):
+        def generate(self, messages, *, chunk_callback=None):
             assert False, "Agent model should not be called when compaction fails"
 
     with tempfile.TemporaryDirectory() as td:
@@ -287,7 +293,7 @@ def test_run_loop_compaction_failure_is_ui_only():
         env.record(Turn(role="user", content="x" * 120))
         env.record(Turn(role="runtime", content="y" * 120))
 
-        agent = Agent(UnusedAgentModel(), system_prompt="test")
+        agent = Agent(UnusedAgentModel(), workspace=Path(td))
         captured = StringIO()
         result = run_loop(agent, env, output=captured)
 
@@ -306,13 +312,13 @@ def test_run_loop_chat():
     """Test that run_loop correctly handles a mock agent returning chat."""
 
     class MockModel:
-        def generate(self, prompt, *, stream=False, chunk_callback=None):
+        def generate(self, messages, *, chunk_callback=None):
             return '<output>{"response": "Hello user!", "action": "chat", "action_input": {}}</output>'
 
     with tempfile.TemporaryDirectory() as td:
         env = Environment(workspace=Path(td))
         env.record(Turn(role="user", content="hi"))
-        agent = Agent(MockModel(), system_prompt="You are helpful.")
+        agent = Agent(MockModel(), workspace=Path(td))
         result = run_loop(agent, env, output=sys.stderr)
         assert result == "Hello user!"
         assert len(env.full_history) == 2  # user + agent
@@ -324,7 +330,7 @@ def test_run_loop_think_then_chat():
     call_count = [0]
 
     class MockModel:
-        def generate(self, prompt, *, stream=False, chunk_callback=None):
+        def generate(self, messages, *, chunk_callback=None):
             call_count[0] += 1
             if call_count[0] == 1:
                 return '<output>{"response": "Let me think...", "action": "think", "action_input": {}}</output>'
@@ -333,7 +339,7 @@ def test_run_loop_think_then_chat():
     with tempfile.TemporaryDirectory() as td:
         env = Environment(workspace=Path(td))
         env.record(Turn(role="user", content="think first"))
-        agent = Agent(MockModel(), system_prompt="test")
+        agent = Agent(MockModel(), workspace=Path(td))
         result = run_loop(agent, env, output=sys.stderr)
         assert result == "Done thinking!"
         assert call_count[0] == 2
@@ -347,7 +353,7 @@ def test_run_loop_parse_retry():
     call_count = [0]
 
     class MockModel:
-        def generate(self, prompt, *, stream=False, chunk_callback=None):
+        def generate(self, messages, *, chunk_callback=None):
             call_count[0] += 1
             if call_count[0] == 1:
                 return "bad output no tags"
@@ -356,7 +362,7 @@ def test_run_loop_parse_retry():
     with tempfile.TemporaryDirectory() as td:
         env = Environment(workspace=Path(td))
         env.record(Turn(role="user", content="test"))
-        agent = Agent(MockModel(), system_prompt="test")
+        agent = Agent(MockModel(), workspace=Path(td))
         result = run_loop(agent, env, output=sys.stderr)
         assert result == "Fixed!"
         assert call_count[0] == 2
@@ -367,13 +373,13 @@ def test_run_loop_max_retries():
     """Test that run_loop stops after max parse failures."""
 
     class MockModel:
-        def generate(self, prompt, *, stream=False, chunk_callback=None):
+        def generate(self, messages, *, chunk_callback=None):
             return "always bad"
 
     with tempfile.TemporaryDirectory() as td:
         env = Environment(workspace=Path(td))
         env.record(Turn(role="user", content="test"))
-        agent = Agent(MockModel(), system_prompt="test")
+        agent = Agent(MockModel(), workspace=Path(td))
         result = run_loop(agent, env, max_retries=2, output=sys.stderr)
         assert "parse failures" in result.lower()
         print("  run_loop (max retries) OK")
@@ -384,7 +390,7 @@ def test_run_loop_exec_denied_returns_control():
     call_count = [0]
 
     class MockModel:
-        def generate(self, prompt, *, stream=False, chunk_callback=None):
+        def generate(self, messages, *, chunk_callback=None):
             call_count[0] += 1
             if call_count[0] == 1:
                 return (
@@ -404,7 +410,7 @@ def test_run_loop_exec_denied_returns_control():
         env = Environment(workspace=Path(td), mode="controlled")
         env.on_before_execute(ApprovalPolicy(mode="controlled", prompt=lambda _prompt: "n"))
         env.record(Turn(role="user", content="check status"))
-        agent = Agent(MockModel(), system_prompt="test")
+        agent = Agent(MockModel(), workspace=Path(td))
         result = run_loop(agent, env, output=sys.stderr)
 
         assert "denied by requester" in result.lower()
@@ -420,7 +426,7 @@ def test_run_loop_exec_cancelled_returns_control():
     call_count = [0]
 
     class MockModel:
-        def generate(self, prompt, *, stream=False, chunk_callback=None):
+        def generate(self, messages, *, chunk_callback=None):
             call_count[0] += 1
             if call_count[0] == 1:
                 return (
@@ -443,7 +449,7 @@ def test_run_loop_exec_cancelled_returns_control():
             prompt=lambda _prompt: (_ for _ in ()).throw(KeyboardInterrupt()),
         ))
         env.record(Turn(role="user", content="check status"))
-        agent = Agent(MockModel(), system_prompt="test")
+        agent = Agent(MockModel(), workspace=Path(td))
         result = run_loop(agent, env, output=sys.stderr)
 
         assert "cancelled during approval prompt" in result.lower()
@@ -480,7 +486,7 @@ if __name__ == "__main__":
     test_environment_dual_history()
     test_environment_build_state()
     test_environment_compaction()
-    test_agent_prompt_keeps_summary_separate_from_recent_history()
+    test_agent_messages_keeps_summary_in_system_and_turns_in_conversation()
     test_environment_compaction_error()
     test_environment_persistence()
 

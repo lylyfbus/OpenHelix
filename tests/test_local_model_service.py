@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import queue
+import shutil
 import sys
 import tempfile
 import threading
@@ -22,26 +23,24 @@ from helix.runtime.local_model_service import (
     _WorkerState,
     _http_json_request,
     _kill_process_tree,
-    default_cache_root,
-    default_runtime_root,
 )
+import helix.runtime.local_model_service.constants as _constants
 from helix.runtime.cli import main as runtime_cli_main
-from helix.runtime.local_model_service.model_specs import manifest_matches
-from helix.runtime.local_model_service.preparer import _hf_cli_command, _hf_download_command
-from helix.runtime.local_model_service.adapter_discovery import discover_and_register_builtins
+from helix.runtime.local_model_service.model_spec import manifest_matches
+from helix.runtime.local_model_service.download import _hf_download_command
+from helix.runtime.local_model_service.adapters import AdapterRegistry
 
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Register built-in adapters so normalize_model_spec/manifest_matches work
-# in the test process (coordinator/worker subprocesses do this at startup).
-discover_and_register_builtins()
+# Register built-in adapters so tests can build backends.
+AdapterRegistry().discover(ROOT / "helix" / "builtin_skills")
 
 
 def _load_skill_adapter(skill_name: str):
     """Load a host_adapter.py module from a builtin skill by name."""
     adapter_path = (
-        ROOT / "helix" / "builtin_skills" / "all-agents" / skill_name / "host_adapter.py"
+        ROOT / "helix" / "builtin_skills" / skill_name / "host_adapter.py"
     )
     spec = importlib.util.spec_from_file_location(f"_test_{skill_name}", adapter_path)
     assert spec is not None and spec.loader is not None
@@ -56,7 +55,6 @@ def _load_model_spec(skill_name: str) -> dict:
             ROOT
             / "helix"
             / "builtin_skills"
-            / "all-agents"
             / skill_name
             / "model_spec.json"
         ).read_text(encoding="utf-8")
@@ -70,7 +68,7 @@ _VIDEO_MODEL_SPEC = _load_model_spec("generate-video")
 
 def _configure_helix_home(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = workspace / ".test-helix-home"
-    monkeypatch.setenv("HELIX_HOME", str(home))
+    monkeypatch.setattr(_constants, "HELIX_HOME", home)
     return home
 
 
@@ -82,6 +80,14 @@ def _start_manager(
     idle_seconds: int = 300,
 ) -> LocalModelServiceManager:
     _configure_helix_home(workspace, monkeypatch)
+    # Copy builtin skills into workspace so the coordinator subprocess can
+    # discover adapters via --skills-root (mirrors host._bootstrap_skills).
+    builtin_src = ROOT / "helix" / "builtin_skills"
+    if builtin_src.is_dir():
+        dst = workspace / "skills" / "builtin_skills"
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(builtin_src, dst)
     manager = LocalModelServiceManager(
         workspace,
         session_id=session_id,
@@ -122,14 +128,11 @@ def test_local_model_service_start_and_stop(monkeypatch: pytest.MonkeyPatch):
         print("  Local model service stop OK")
 
 
-def test_local_model_service_default_cache_root_is_global(monkeypatch: pytest.MonkeyPatch):
+def test_local_model_service_default_paths_use_helix_home(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         helix_home = _configure_helix_home(workspace, monkeypatch)
-        expected_cache = helix_home / "cache" / "local-model-service"
-        expected_runtime = helix_home / "runtime" / "services" / "local-model-service"
-        assert default_cache_root(workspace) == expected_cache.resolve()
-        assert default_runtime_root() == expected_runtime.resolve()
+        expected_service_root = helix_home / "local-model-service"
 
         manager = LocalModelServiceManager(
             workspace,
@@ -141,11 +144,10 @@ def test_local_model_service_default_cache_root_is_global(monkeypatch: pytest.Mo
         except PermissionError as exc:
             pytest.skip(f"local socket bind is not permitted in this environment: {exc}")
         try:
-            assert manager.cache_root == expected_cache.resolve()
-            assert manager.cache_root.exists()
-            assert manager.runtime_dir == expected_runtime.resolve()
-            assert manager.state_path == expected_runtime.resolve() / "service.json"
-            print("  Local model service global cache/runtime root OK")
+            assert manager.service_root == expected_service_root.resolve()
+            assert manager.service_root.exists()
+            assert manager.state_path == expected_service_root.resolve() / "service.json"
+            print("  Local model service default paths OK")
         finally:
             manager.stop()
 
@@ -318,7 +320,7 @@ def test_local_model_service_model_spec_requires_prepare(monkeypatch: pytest.Mon
                 },
             )
             assert status == 400
-            assert parsed["error_code"] == "model_not_prepared"
+            assert parsed["error_code"] == "model_error"
         finally:
             manager.stop()
 
@@ -391,17 +393,11 @@ def test_local_model_service_recovers_stale_coordinator_state(monkeypatch: pytes
 def test_request_worker_ignores_non_json_stdout_until_json_response():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td).resolve()
-        runtime_dir = workspace / ".runtime"
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        log_path = runtime_dir / "worker.log"
-        log_path.write_text("", encoding="utf-8")
-
         controller = _CoordinatorController(
-            cache_root=workspace / ".cache",
+            service_root=workspace / ".service",
             token="secret",
             idle_seconds=300,
             backend_mode="fake",
-            runtime_dir=runtime_dir,
         )
         try:
             class FakeProcess:
@@ -431,10 +427,9 @@ def test_request_worker_ignores_non_json_stdout_until_json_response():
                 model_id="uqer1244/MLX-z-image",
                 process=FakeProcess(),
                 stdout_queue=stdout_queue,
+                stderr_lines=[],
                 stdin_lock=threading.Lock(),
                 started_at=time.time(),
-                log_handle=io.StringIO(),
-                log_path=log_path,
             )
 
             result = controller._request_worker(worker, {"hello": "world"})
@@ -449,17 +444,11 @@ def test_request_worker_ignores_non_json_stdout_until_json_response():
 def test_request_worker_uses_request_timeout_override():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td).resolve()
-        runtime_dir = workspace / ".runtime"
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        log_path = runtime_dir / "worker.log"
-        log_path.write_text("", encoding="utf-8")
-
         controller = _CoordinatorController(
-            cache_root=workspace / ".cache",
+            service_root=workspace / ".service",
             token="secret",
             idle_seconds=300,
             backend_mode="fake",
-            runtime_dir=runtime_dir,
         )
         try:
             class FakeProcess:
@@ -485,10 +474,9 @@ def test_request_worker_uses_request_timeout_override():
                 model_id="uqer1244/MLX-z-image",
                 process=FakeProcess(),
                 stdout_queue=queue.Queue(),
+                stderr_lines=[],
                 stdin_lock=threading.Lock(),
                 started_at=time.time(),
-                log_handle=io.StringIO(),
-                log_path=log_path,
             )
 
             started = time.monotonic()
@@ -510,6 +498,7 @@ def test_worker_env_enables_hf_xet_high_performance(monkeypatch: pytest.MonkeyPa
             self.pid = 43210
             self.stdin = io.StringIO()
             self.stdout = io.StringIO('{"status":"ready","task_type":"text_to_image","backend":"pytorch","model_id":"Tongyi-MAI/Z-Image-Turbo","pid":43210}\n')
+            self.stderr = io.StringIO()
             self._env = env
 
         def poll(self) -> None:
@@ -530,19 +519,18 @@ def test_worker_env_enables_hf_xet_high_performance(monkeypatch: pytest.MonkeyPa
         return FakeProcess(captured_env)
 
     monkeypatch.setattr(
-        "helix.runtime.local_model_service.coordinator._worker_python",
-        lambda cache_root: Path("/tmp/fake-python"),
+        "helix.runtime.local_model_service.server._worker_python",
+        lambda venv_root: Path("/tmp/fake-python"),
     )
-    monkeypatch.setattr("helix.runtime.local_model_service.coordinator.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("helix.runtime.local_model_service.server.subprocess.Popen", fake_popen)
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         controller = _CoordinatorController(
-            cache_root=root / "cache",
+            service_root=root / "service",
             token="token",
             idle_seconds=300,
             backend_mode="fake",
-            runtime_dir=root / "runtime",
         )
         try:
             worker = controller._start_worker_locked(
@@ -553,7 +541,7 @@ def test_worker_env_enables_hf_xet_high_performance(monkeypatch: pytest.MonkeyPa
             assert worker.pid == 43210
             assert worker.backend == "pytorch"
             assert captured_env["HF_HUB_DISABLE_XET"] == "1"
-            assert captured_env["HF_HOME"].endswith("/cache/pytorch/models")
+            assert captured_env["HF_HOME"].endswith("/service/models")
         finally:
             controller.close()
 
@@ -595,16 +583,16 @@ def test_runtime_cli_model_download_uses_prepare_subsystem(
         spec_path = workspace / "model_spec.json"
         spec_path.write_text(json.dumps(_AUDIO_MODEL_SPEC), encoding="utf-8")
 
-        def fake_prepare_model_spec(*, cache_root, model_spec, backend_mode, timeout_seconds, progress_stream):
+        def fake_download_model(*, service_root, model_spec, backend_mode, timeout_seconds, progress_stream):
             assert backend_mode == "real"
             assert timeout_seconds == 3600
             assert model_spec["id"] == _AUDIO_MODEL_SPEC["id"]
             assert progress_stream is not None
-            return model_spec, cache_root / "pytorch" / "models" / "Qwen"
+            return model_spec, service_root / "models" / "Qwen"
 
         monkeypatch.setattr(
-            "helix.runtime.cli.prepare_model_spec",
-            fake_prepare_model_spec,
+            "helix.runtime.cli.download_model",
+            fake_download_model,
         )
 
         code = runtime_cli_main(["model", "download", "--spec", str(spec_path)])
@@ -614,39 +602,41 @@ def test_runtime_cli_model_download_uses_prepare_subsystem(
         assert captured["status"] == "ok"
         assert captured["backend"] == "pytorch"
         assert captured["task_type"] == "text_to_audio"
-        assert captured["model_root"].endswith("/pytorch/models/Qwen")
+        assert captured["model_root"].endswith("/models/Qwen")
 
 
-def test_hf_cli_command_prefers_hf_binary(tmp_path: Path):
+_DL_KWARGS = dict(repo_id="test/repo", local_dir=Path("/tmp/out"), include_patterns=[], exclude_patterns=[])
+
+
+def test_hf_download_command_prefers_hf_binary(tmp_path: Path):
     python_bin = tmp_path / "venv" / "bin" / "python"
     hf_bin = python_bin.parent / "hf"
     hf_bin.parent.mkdir(parents=True, exist_ok=True)
     python_bin.write_text("", encoding="utf-8")
     hf_bin.write_text("", encoding="utf-8")
 
-    assert _hf_cli_command(python_bin) == [str(hf_bin)]
+    cmd = _hf_download_command(python_bin=python_bin, **_DL_KWARGS)
+    assert cmd[0] == str(hf_bin)
 
 
-def test_hf_cli_command_falls_back_to_legacy_binary(tmp_path: Path):
+def test_hf_download_command_falls_back_to_legacy_binary(tmp_path: Path):
     python_bin = tmp_path / "venv" / "bin" / "python"
     legacy_bin = python_bin.parent / "huggingface-cli"
     legacy_bin.parent.mkdir(parents=True, exist_ok=True)
     python_bin.write_text("", encoding="utf-8")
     legacy_bin.write_text("", encoding="utf-8")
 
-    assert _hf_cli_command(python_bin) == [str(legacy_bin)]
+    cmd = _hf_download_command(python_bin=python_bin, **_DL_KWARGS)
+    assert cmd[0] == str(legacy_bin)
 
 
-def test_hf_cli_command_falls_back_to_module_invocation(tmp_path: Path):
+def test_hf_download_command_falls_back_to_module_invocation(tmp_path: Path):
     python_bin = tmp_path / "venv" / "bin" / "python"
     python_bin.parent.mkdir(parents=True, exist_ok=True)
     python_bin.write_text("", encoding="utf-8")
 
-    assert _hf_cli_command(python_bin) == [
-        str(python_bin),
-        "-m",
-        "huggingface_hub.commands.huggingface_cli",
-    ]
+    cmd = _hf_download_command(python_bin=python_bin, **_DL_KWARGS)
+    assert cmd[:3] == [str(python_bin), "-m", "huggingface_hub.commands.huggingface_cli"]
 
 
 def test_hf_download_command_uses_positional_patterns_when_possible(tmp_path: Path):

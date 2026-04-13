@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 
-from .coordinator import _coordinator_main
-from .protocol import _DEFAULT_BACKEND_MODE, _DEFAULT_IDLE_SECONDS
+from .server import _coordinator_main
+from .constants import DEFAULT_BACKEND_MODE, DEFAULT_IDLE_SECONDS
 from .worker import _worker_main
 
 
@@ -14,23 +14,23 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="role", required=True)
 
     coordinator = subparsers.add_parser("coordinator")
-    coordinator.add_argument("--cache-root", required=True)
-    coordinator.add_argument("--runtime-dir", required=True)
+    coordinator.add_argument("--service-root", required=True)
     coordinator.add_argument("--host", required=True)
     coordinator.add_argument("--port", required=True)
     coordinator.add_argument("--token", required=True)
-    coordinator.add_argument("--idle-seconds", default=str(_DEFAULT_IDLE_SECONDS))
-    coordinator.add_argument("--backend-mode", default=_DEFAULT_BACKEND_MODE)
+    coordinator.add_argument("--idle-seconds", default=str(DEFAULT_IDLE_SECONDS))
+    coordinator.add_argument("--backend-mode", default=DEFAULT_BACKEND_MODE)
     coordinator.add_argument("--skills-root", default="")
 
     worker = subparsers.add_parser("worker")
-    worker.add_argument("--cache-root", required=True)
+    worker.add_argument("--skill-name", required=True)
+    worker.add_argument("--service-root", required=True)
     worker.add_argument("--task-type", required=True)
     worker.add_argument("--backend", required=True)
     worker.add_argument("--model-id", required=True)
     worker.add_argument("--model-spec-json", default="")
     worker.add_argument("--model-root", default="")
-    worker.add_argument("--backend-mode", default=_DEFAULT_BACKEND_MODE)
+    worker.add_argument("--backend-mode", default=DEFAULT_BACKEND_MODE)
     worker.add_argument("--skills-root", default="")
 
     return parser

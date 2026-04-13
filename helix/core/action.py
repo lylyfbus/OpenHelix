@@ -15,7 +15,6 @@ ALLOWED_CORE_ACTIONS = frozenset({"chat", "think", "exec", "delegate"})
 ALLOWED_SUB_ACTIONS = frozenset({"chat", "think", "exec"})
 
 
-
 @dataclass
 class Action:
     """Agent output per turn.
@@ -47,8 +46,6 @@ class ActionParseError(Exception):
 # --------------------------------------------------------------------------- #
 # Output parser
 # --------------------------------------------------------------------------- #
-
-
 
 
 def parse_action(
@@ -114,7 +111,7 @@ def parse_action(
             raw_text=raw_llm_output,
         )
 
-    # 6. Validate action_input shape
+    # 5. Validate action_input shape
     if not isinstance(action_input, dict):
         action_input = {}
 

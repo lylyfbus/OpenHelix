@@ -145,7 +145,17 @@ def render_session_view_html(
 """
 
     if field == "last_prompt":
-        prompt_text = str(value) if str(value) else "(none yet)"
+        if isinstance(value, list):
+            # New format: list of message dicts with role/content
+            parts: list[str] = []
+            for msg in value:
+                if isinstance(msg, dict):
+                    role = str(msg.get("role", "unknown"))
+                    content = str(msg.get("content", ""))
+                    parts.append(f"=== {role.upper()} ===\n{content}")
+            prompt_text = "\n\n".join(parts) if parts else "(none yet)"
+        else:
+            prompt_text = str(value) if str(value) else "(none yet)"
         return _render_text_view(
             eyebrow="Agentic System Prompt View",
             body_text=prompt_text,

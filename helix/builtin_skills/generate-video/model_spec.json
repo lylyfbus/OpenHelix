@@ -1,0 +1,15 @@
+{
+  "backend": "pytorch",
+  "source": {
+    "repo_id": "Wan-AI/Wan2.1-T2V-14B-Diffusers"
+  },
+  "download_manifest": {
+    "include": [],
+    "exclude": [],
+    "required": [
+      "model_index.json",
+      "vae/config.json",
+      "vae/*.safetensors"
+    ]
+  }
+}

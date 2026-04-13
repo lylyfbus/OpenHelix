@@ -8,8 +8,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from helix.runtime.sandbox import DockerSandboxExecutor, docker_is_available
+from helix.runtime.sandbox import DockerSandboxExecutor
+from helix.runtime.host import docker_is_available
 from helix.runtime.local_model_service import LocalModelServiceManager
+import helix.runtime.local_model_service.constants as _constants
 
 
 def _docker_ready() -> bool:
@@ -20,18 +22,17 @@ def _docker_ready() -> bool:
     return True
 
 
-def _set_helix_home(workspace: Path) -> tuple[str | None, Path]:
-    previous = os.environ.get("HELIX_HOME")
+_ORIGINAL_HELIX_HOME = _constants.HELIX_HOME
+
+
+def _set_helix_home(workspace: Path) -> tuple[Path, Path]:
     home = workspace / ".test-helix-home"
-    os.environ["HELIX_HOME"] = str(home)
-    return previous, home
+    _constants.HELIX_HOME = home
+    return _ORIGINAL_HELIX_HOME, home
 
 
-def _restore_helix_home(previous: str | None) -> None:
-    if previous is None:
-        os.environ.pop("HELIX_HOME", None)
-    else:
-        os.environ["HELIX_HOME"] = previous
+def _restore_helix_home(previous: Path) -> None:
+    _constants.HELIX_HOME = previous
 
 
 def test_docker_sandbox_uses_global_service_paths():
@@ -254,13 +255,12 @@ def test_docker_sandbox_image_skill_can_reach_local_model_service():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         previous, _ = _set_helix_home(workspace)
-        skills_root = workspace / "skills" / "all-agents"
+        skills_root = workspace / "skills" / "builtin_skills"
         skills_root.mkdir(parents=True, exist_ok=True)
         source_skill = (
             Path(__file__).resolve().parent.parent
             / "helix"
             / "builtin_skills"
-            / "all-agents"
             / "generate-image"
         )
         shutil.copytree(source_skill, skills_root / "generate-image")
@@ -280,7 +280,7 @@ def test_docker_sandbox_image_skill_can_reach_local_model_service():
                 {
                     "job_name": "docker-image-prepare",
                     "code_type": "python",
-                    "script_path": "skills/all-agents/generate-image/scripts/prepare_model.py",
+                    "script_path": "skills/builtin_skills/generate-image/scripts/prepare_model.py",
                     "script_args": [],
                 },
                 workspace,
@@ -292,7 +292,7 @@ def test_docker_sandbox_image_skill_can_reach_local_model_service():
                 {
                     "job_name": "docker-image-skill",
                     "code_type": "python",
-                    "script_path": "skills/all-agents/generate-image/scripts/generate_image.py",
+                    "script_path": "skills/builtin_skills/generate-image/scripts/generate_image.py",
                     "script_args": [
                         "--prompt", "A minimal test image",
                         "--output-dir", "generated_images",
@@ -319,13 +319,12 @@ def test_docker_sandbox_audio_skill_can_reach_local_model_service():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         previous, _ = _set_helix_home(workspace)
-        skills_root = workspace / "skills" / "all-agents"
+        skills_root = workspace / "skills" / "builtin_skills"
         skills_root.mkdir(parents=True, exist_ok=True)
         source_skill = (
             Path(__file__).resolve().parent.parent
             / "helix"
             / "builtin_skills"
-            / "all-agents"
             / "generate-audio"
         )
         shutil.copytree(source_skill, skills_root / "generate-audio")
@@ -345,7 +344,7 @@ def test_docker_sandbox_audio_skill_can_reach_local_model_service():
                 {
                     "job_name": "docker-audio-prepare",
                     "code_type": "python",
-                    "script_path": "skills/all-agents/generate-audio/scripts/prepare_model.py",
+                    "script_path": "skills/builtin_skills/generate-audio/scripts/prepare_model.py",
                     "script_args": [],
                 },
                 workspace,
@@ -357,7 +356,7 @@ def test_docker_sandbox_audio_skill_can_reach_local_model_service():
                 {
                     "job_name": "docker-audio-skill",
                     "code_type": "python",
-                    "script_path": "skills/all-agents/generate-audio/scripts/generate_audio.py",
+                    "script_path": "skills/builtin_skills/generate-audio/scripts/generate_audio.py",
                     "script_args": [
                         "--text", "Hello from the local audio skill",
                         "--output-dir", "generated_audio",
@@ -384,13 +383,12 @@ def test_docker_sandbox_video_skill_can_reach_local_model_service():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         previous, _ = _set_helix_home(workspace)
-        skills_root = workspace / "skills" / "all-agents"
+        skills_root = workspace / "skills" / "builtin_skills"
         skills_root.mkdir(parents=True, exist_ok=True)
         source_skill = (
             Path(__file__).resolve().parent.parent
             / "helix"
             / "builtin_skills"
-            / "all-agents"
             / "generate-video"
         )
         shutil.copytree(source_skill, skills_root / "generate-video")
@@ -410,7 +408,7 @@ def test_docker_sandbox_video_skill_can_reach_local_model_service():
                 {
                     "job_name": "docker-video-prepare",
                     "code_type": "python",
-                    "script_path": "skills/all-agents/generate-video/scripts/prepare_model.py",
+                    "script_path": "skills/builtin_skills/generate-video/scripts/prepare_model.py",
                     "script_args": [],
                 },
                 workspace,
@@ -422,7 +420,7 @@ def test_docker_sandbox_video_skill_can_reach_local_model_service():
                 {
                     "job_name": "docker-video-skill",
                     "code_type": "python",
-                    "script_path": "skills/all-agents/generate-video/scripts/generate_video.py",
+                    "script_path": "skills/builtin_skills/generate-video/scripts/generate_video.py",
                     "script_args": [
                         "--prompt", "A calm beach at sunset",
                         "--output-dir", "generated_videos",
