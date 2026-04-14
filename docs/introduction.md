@@ -27,9 +27,9 @@ The default setup uses no external services:
 |---|---|
 | LLM reasoning | Ollama (llama3.1, deepseek, etc.) |
 | Web search | SearXNG (self-hosted Docker container) |
-| Image generation | MLX Z-Image (Apple Silicon) |
+| Image generation | Z-Image (MLX, Apple Silicon) |
 | Audio generation | Qwen3-TTS (PyTorch) |
-| Video generation | Wan Video (PyTorch) |
+| Video generation | LTX-2.3 (MLX, Apple Silicon) |
 | Script execution | Docker sandbox (ephemeral, isolated) |
 
 Your workspace files, conversation history, knowledge documents, and generated artifacts all stay on your machine.

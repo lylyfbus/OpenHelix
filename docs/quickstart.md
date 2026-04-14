@@ -100,7 +100,7 @@ helix status
 
 ## Next Steps
 
-- [Architecture](architecture.md) — understand how the system works
-- [Skills Guide](skills-guide.md) — learn about skills and create your own
-- [Knowledge Guide](knowledge-guide.md) — document and retrieve knowledge
-- [CLI Reference](cli-reference.md) — all commands and options
+- [Introduction](introduction.md) — core concepts and design philosophy
+- [Skills](skills.md) — built-in skills and how to create your own
+- [Knowledge](knowledge.md) — the hierarchical knowledge system
+- [Storage](storage.md) — where OpenHelix puts every file on your machine
