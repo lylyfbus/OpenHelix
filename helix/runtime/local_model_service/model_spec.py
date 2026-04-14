@@ -51,16 +51,12 @@ def normalize_model_spec(model_spec: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(prerequisites, dict):
         raise ValueError("model_spec.prerequisites must be a JSON object when provided")
 
-    result: dict[str, Any] = {
+    return {
         "backend": backend,
         "source": {"repo_id": repo_id},
         "download_manifest": {"include": include, "exclude": exclude, "required": required},
         "prerequisites": dict(prerequisites),
     }
-    sources = model_spec.get("sources")
-    if isinstance(sources, dict):
-        result["sources"] = dict(sources)
-    return result
 
 
 def model_spec_signature(model_spec: dict[str, Any]) -> str:

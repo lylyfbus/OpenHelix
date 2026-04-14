@@ -33,44 +33,25 @@ _PACKAGE_PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 
 
 def _load_sys_prompt(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    result: dict[str, str] = {}
-    for key, value in raw.items():
-        role = str(key).strip()
-        if not role:
-            continue
-        if isinstance(value, list):
-            result[role] = "\n".join(str(item) for item in value)
-        else:
-            result[role] = str(value)
-    return result
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        role: "\n".join(value) if isinstance(value, list) else str(value)
+        for role, value in raw.items()
+    }
 
 
 def _parse_frontmatter(text: str) -> dict[str, str]:
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}
-    end = -1
-    for idx in range(1, len(lines)):
-        if lines[idx].strip() == "---":
-            end = idx
-            break
-    if end == -1:
-        return {}
     result: dict[str, str] = {}
-    for raw in lines[1:end]:
-        line = raw.strip()
-        if not line or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        result[key.strip()] = value.strip()
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if ":" in stripped:
+            key, _, value = stripped.partition(":")
+            result[key.strip()] = value.strip()
     return result
 
 

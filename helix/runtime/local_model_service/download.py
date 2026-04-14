@@ -1,15 +1,14 @@
-"""Model and source file preparation for local model inference."""
+"""Model weight preparation for local model inference."""
 
 from __future__ import annotations
 
 import os
 import shutil
 import subprocess
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .constants import MODELS_SUBDIR, SERVICE_ROOT, VENVS_SUBDIR, sources_path
+from .constants import MODELS_SUBDIR, SERVICE_ROOT, VENVS_SUBDIR
 from .model_spec import manifest_matches, normalize_model_spec
 from .helpers import _ensure_worker_dependencies, _worker_python
 _HF_CLI_DEPENDENCIES = ("huggingface_hub[cli]",)
@@ -22,10 +21,7 @@ def download_model(
     timeout_seconds: int,
     progress_stream: Any,
 ) -> tuple[dict[str, Any], Path]:
-    """Download model weights and optional source files.
-
-    Skips downloading if all required files already exist.
-    """
+    """Download model weights. Skips if all required files already exist."""
     normalized = normalize_model_spec(model_spec)
     _check_prerequisites(normalized)
     repo_id = normalized["source"]["repo_id"]
@@ -35,13 +31,10 @@ def download_model(
         model_root.mkdir(parents=True, exist_ok=True)
         return normalized, model_root
 
-    # Skip if already complete
     if model_root.exists() and manifest_matches(model_root, normalized):
         progress_stream.write(f"Model {repo_id} already downloaded, skipping.\n")
-        _download_sources(normalized, progress_stream)
         return normalized, model_root
 
-    # Download model weights from HuggingFace
     venv_root = SERVICE_ROOT / VENVS_SUBDIR / normalized["backend"]
     venv_root.mkdir(parents=True, exist_ok=True)
     python_bin = _worker_python(venv_root)
@@ -70,49 +63,16 @@ def download_model(
     if not manifest_matches(model_root, normalized):
         raise RuntimeError(f"prepared files are incomplete for {repo_id}")
 
-    # Download source files if specified
-    _download_sources(normalized, progress_stream)
-
     return normalized, model_root
-
-
-def _download_sources(normalized: dict[str, Any], progress_stream: Any) -> None:
-    """Download runtime source files if model_spec defines them."""
-    sources = normalized.get("sources")
-    if not isinstance(sources, dict):
-        return
-    skill_name = str(sources.get("skill_name", "")).strip()
-    repo_url = str(sources.get("repo", "")).strip()
-    commit = str(sources.get("commit", "")).strip()
-    files = sources.get("files", [])
-    if not all((skill_name, repo_url, commit, files)):
-        return
-
-    sources_root = sources_path(skill_name, commit)
-    sources_root.mkdir(parents=True, exist_ok=True)
-
-    for filename in files:
-        target = sources_root / filename
-        if target.exists():
-            continue
-        url = f"{repo_url.rstrip('/')}/{commit}/{filename}"
-        progress_stream.write(f"Downloading source: {filename}\n")
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            target.write_bytes(resp.read())
 
 
 def _hf_download_command(
     *, python_bin: Path, repo_id: str, local_dir: Path,
     include_patterns: list[str], exclude_patterns: list[str],
 ) -> list[str]:
-    bin_dir = python_bin.parent
-    hf_bin = bin_dir / "hf"
-    legacy_bin = bin_dir / "huggingface-cli"
+    hf_bin = python_bin.parent / "hf"
     if hf_bin.exists():
         cli = [str(hf_bin)]
-    elif legacy_bin.exists():
-        cli = [str(legacy_bin)]
     else:
         cli = [str(python_bin), "-m", "huggingface_hub.commands.huggingface_cli"]
     cmd = [*cli, "download", repo_id]

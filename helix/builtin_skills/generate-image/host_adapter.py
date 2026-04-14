@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import urllib.request
+from pathlib import Path
 from typing import Any
 
 from helix.runtime.local_model_service.adapters import _BaseBackend
-from helix.runtime.local_model_service.helpers import _ensure_worker_dependencies
-from helix.runtime.local_model_service.constants import sources_path
 from helix.runtime.local_model_service.helpers import (
+    _ensure_worker_dependencies,
     _parse_int,
     _parse_size,
     _request_inputs,
@@ -32,6 +33,17 @@ _MLX_DEPENDENCIES = (
     "tqdm",
 )
 
+# The MLX Z-Image pipeline is published as loose Python files on GitHub, not as
+# a pip package. We pin a specific commit and fetch the files on first load.
+_RUNNER_REPO = "https://raw.githubusercontent.com/uqer1244/MLX_z-image"
+_RUNNER_COMMIT = "b508c3555cd49b5fb5afd3434053a55d1710c129"
+_RUNNER_FILES = (
+    "lora_utils.py",
+    "mlx_pipeline.py",
+    "mlx_text_encoder.py",
+    "mlx_z_image.py",
+)
+
 
 class _MLXZImageBackend(_BaseBackend):
     def __init__(self, **kwargs) -> None:
@@ -44,20 +56,9 @@ class _MLXZImageBackend(_BaseBackend):
         assert self.model_spec is not None
         _ensure_worker_dependencies(self.python_bin, _MLX_DEPENDENCIES)
 
-        # Locate pre-downloaded source files
-        sources = self.model_spec.get("sources", {})
-        commit = str(sources.get("commit", "")).strip()
-        skill_name = str(sources.get("skill_name", "")).strip()
-        if not commit or not skill_name:
-            raise RuntimeError("model_spec.sources must define skill_name and commit")
-        source_root = sources_path(skill_name, commit)
-        if not source_root.exists():
-            raise RuntimeError(
-                f"MLX runner sources not found at {source_root}. "
-                "Run: helix model download --skill generate-image"
-            )
-        if str(source_root) not in sys.path:
-            sys.path.insert(0, str(source_root))
+        runner_root = self._ensure_runner_sources()
+        if str(runner_root) not in sys.path:
+            sys.path.insert(0, str(runner_root))
         from mlx_pipeline import ZImagePipeline
 
         repo_id = str(self.model_spec["source"]["repo_id"])
@@ -67,6 +68,19 @@ class _MLXZImageBackend(_BaseBackend):
                 text_encoder_path=str(self.model_root / "text_encoder"),
                 repo_id=repo_id,
             )
+
+    def _ensure_runner_sources(self) -> Path:
+        assert self.model_root is not None
+        runner_root = self.model_root / "_runner" / _RUNNER_COMMIT
+        runner_root.mkdir(parents=True, exist_ok=True)
+        for filename in _RUNNER_FILES:
+            target = runner_root / filename
+            if target.exists():
+                continue
+            url = f"{_RUNNER_REPO}/{_RUNNER_COMMIT}/{filename}"
+            with urllib.request.urlopen(url, timeout=60) as resp:
+                target.write_bytes(resp.read())
+        return runner_root
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
         inputs = _request_inputs(payload)

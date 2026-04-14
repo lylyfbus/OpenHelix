@@ -24,16 +24,5 @@
       "vae/config.json",
       "vae/*.safetensors"
     ]
-  },
-  "sources": {
-    "skill_name": "generate-image",
-    "repo": "https://raw.githubusercontent.com/uqer1244/MLX_z-image",
-    "commit": "b508c3555cd49b5fb5afd3434053a55d1710c129",
-    "files": [
-      "lora_utils.py",
-      "mlx_pipeline.py",
-      "mlx_text_encoder.py",
-      "mlx_z_image.py"
-    ]
   }
 }

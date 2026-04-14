@@ -18,21 +18,13 @@ SERVICE_NAME = "local-model-service"
 #       <repo_id (/ → --)>/                  ← downloaded model weights
 #     venvs/                                 ← VENVS_SUBDIR
 #       <backend>/                           ← per-backend Python venv
-#     sources/                               ← SOURCES_SUBDIR
-#       <skill-name>/<commit>/               ← downloaded runtime source files
 #     service.json                           ← SERVICE_STATE_FILE
 #
 
 MODELS_SUBDIR = "models"
 VENVS_SUBDIR = "venvs"
-SOURCES_SUBDIR = "sources"
 SERVICE_STATE_FILE = "state.json"
 SERVICE_ROOT = SERVICES_ROOT / SERVICE_NAME
-
-
-def sources_path(skill_name: str, commit: str) -> Path:
-    """Return the path to a skill's downloaded source files."""
-    return SERVICE_ROOT / SOURCES_SUBDIR / skill_name / commit
 
 # -- Backend modes -----------------------------------------------------------
 
