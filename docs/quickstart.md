@@ -39,6 +39,8 @@ user> What files are in the current directory?
 
 The agent will write a bash script (`ls -la`), execute it in the Docker sandbox, read the output, and report back.
 
+By default the agent starts in `--mode controlled`, which means **every bash or python execution pauses for your approval first**. You'll see a prompt showing the job name, the script, and an `[y/N/s/p/k]` menu (`y` = allow once, `s` = allow same exact exec for the session, `p` = allow same script pattern, `k` = allow same script_path ignoring args, `N` = deny). If you'd rather let the agent run autonomously without any interruptions, add `--mode auto` to the `helix` command. The two valid values are `controlled` and `auto`.
+
 ## Option B: Cloud LLM (DeepSeek)
 
 ```bash

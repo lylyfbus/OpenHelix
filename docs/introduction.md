@@ -16,6 +16,7 @@ There are no hidden prompts, no invisible system instructions, no black-box tool
 - **The exact LLM request** — use `/view last_prompt` to see the complete messages array sent to the model
 - **The full conversation history** — use `/view full_history` to see every turn, including runtime observations
 - **All skills and knowledge** — plain markdown files in your workspace, readable and editable
+- **Every execution before it runs** — by default OpenHelix starts in `--mode controlled`, which pauses for your approval on every bash or python exec, showing you the job name, the script, and an approval menu. You can allow once, allow same-exact, allow same-pattern, allow same-path, or deny. For autonomous runs without prompts, launch with `--mode auto`.
 
 The code itself is clean and documented. Every component has one job. You can read any source file and understand what it does.
 

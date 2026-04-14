@@ -51,6 +51,8 @@ helix \
 
 You land in an interactive prompt. Type a task in plain English and the agent will plan and execute it inside the Docker sandbox. Type `/help` for commands, `/exit` to quit.
 
+**About approval mode.** By default the agent runs in `--mode controlled`, which prompts you to approve every bash/python execution before it runs. You see the job name, the script, and an `[y/N/s/p/k]` menu — this is how OpenHelix keeps you in the loop on every concrete action the agent takes. If you trust the task and want the agent to run autonomously without prompts, start it with `--mode auto`. The two valid values are `controlled` (default) and `auto`.
+
 ### 3. Optional: Add Local Services
 
 ```bash
@@ -124,12 +126,14 @@ Everything is inspectable. `/view last_prompt` shows the exact text sent to the 
 
 | Command | Purpose |
 |---|---|
-| `helix --endpoint-url URL --model MODEL --workspace PATH --session-id ID` | Start a session |
+| `helix --endpoint-url URL --model MODEL --workspace PATH --session-id ID [--mode auto\|controlled]` | Start a session |
 | `helix start searxng` | Start the SearXNG search service |
 | `helix start local-model-service --workspace PATH` | Start the local model service |
 | `helix stop searxng \| local-model-service` | Stop a running service |
 | `helix status` | Show running services |
 | `helix model download --skill NAME` | Download model weights for a media-generation skill |
+
+`--mode` controls the approval policy: `controlled` (default) prompts you before every bash/python execution; `auto` runs without prompts.
 
 ## Runtime Commands
 
