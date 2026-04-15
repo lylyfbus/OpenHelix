@@ -125,6 +125,11 @@ class RuntimeHost:
 
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self.knowledge_root = self.workspace / "knowledge"
+        self.knowledge_root.mkdir(parents=True, exist_ok=True)
+        knowledge_index = self.knowledge_root / "index.json"
+        if not knowledge_index.exists():
+            knowledge_index.write_text("[]\n", encoding="utf-8")
         self.session_id = self._normalize_session_id(session_id)
         self.session_root = (self.workspace / "sessions" / self.session_id).resolve()
         self.project_root = self.session_root / "project"
