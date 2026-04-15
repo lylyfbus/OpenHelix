@@ -13,7 +13,6 @@ import secrets
 import subprocess
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 from helix.runtime.local_model_service.constants import (
@@ -32,8 +31,12 @@ from helix.runtime.local_model_service.helpers import (
 _STATE_PATH = SERVICE_ROOT / "state.json"
 
 
-def start(workspace: Path) -> dict[str, Any]:
+def start() -> dict[str, Any]:
     """Start the coordinator process and write state.json.
+
+    The coordinator is workspace-agnostic — each request carries its own
+    ``workspace_root`` and the coordinator derives ``skills_root`` per
+    request. A single running coordinator serves clients from any workspace.
 
     If an existing coordinator is healthy, reuse it.
     Returns the service state dict.
@@ -43,7 +46,6 @@ def start(workspace: Path) -> dict[str, Any]:
         return existing
 
     SERVICE_ROOT.mkdir(parents=True, exist_ok=True)
-    workspace = Path(workspace).expanduser().resolve()
     port = _find_free_port()
     token = f"tok_{secrets.token_urlsafe(24)}"
     backend_mode = DEFAULT_BACKEND_MODE
@@ -59,7 +61,6 @@ def start(workspace: Path) -> dict[str, Any]:
             f"--token={token}",
             "--idle-seconds", str(DEFAULT_IDLE_SECONDS),
             "--backend-mode", backend_mode,
-            "--skills-root", str(workspace / "skills"),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

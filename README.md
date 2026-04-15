@@ -60,7 +60,7 @@ You land in an interactive prompt. Type a task in plain English and the agent wi
 helix start searxng
 
 # Local image / audio / video generation
-helix start local-model-service --workspace ~/agent
+helix start local-model-service
 helix model download --skill generate-image
 helix model download --skill generate-audio
 helix model download --skill generate-video
@@ -128,7 +128,7 @@ Everything is inspectable. `/view last_prompt` shows the exact text sent to the 
 |---|---|
 | `helix --endpoint-url URL --model MODEL --workspace PATH --session-id ID [--mode auto\|controlled]` | Start a session |
 | `helix start searxng` | Start the SearXNG search service |
-| `helix start local-model-service --workspace PATH` | Start the local model service |
+| `helix start local-model-service` | Start the local model service |
 | `helix stop searxng \| local-model-service` | Stop a running service |
 | `helix status` | Show running services |
 | `helix model download --skill NAME` | Download model weights for a media-generation skill |

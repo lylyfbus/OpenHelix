@@ -17,10 +17,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .helpers import _worker_python
-from .model_spec import model_spec_signature, normalize_model_spec
 from .constants import COORDINATOR_HEALTH_PATH, MODELS_SUBDIR, STARTUP_TIMEOUT_SECONDS, VENVS_SUBDIR
-from .helpers import _error_response, _json_dumps, _request_timeout_seconds, _request_inputs
+from .helpers import (
+    _error_response,
+    _json_dumps,
+    _request_inputs,
+    _request_timeout_seconds,
+    _resolve_service_workspace_root,
+    _worker_python,
+)
+from .model_spec import model_spec_signature, normalize_model_spec
 
 
 @dataclass
@@ -28,6 +34,7 @@ class _WorkerState:
     backend: str
     model_id: str
     model_signature: str
+    skills_root: str
     process: subprocess.Popen[str]
     stdout_queue: "queue.Queue[str]"
     stderr_lines: list[str]
@@ -51,11 +58,9 @@ class _CoordinatorController:
         token: str,
         idle_seconds: int,
         backend_mode: str,
-        skills_root: str = "",
     ) -> None:
         self.service_root = service_root
         self.token = token
-        self.skills_root = str(skills_root or "").strip()
         self.idle_seconds = max(1, int(idle_seconds))
         self.backend_mode = backend_mode
         self._lock = threading.Lock()
@@ -93,7 +98,11 @@ class _CoordinatorController:
         normalized, model_root = self._resolve_request(payload)
         skill_name = self._require_field(payload, "skill_name")
         task_type = str(payload.get("task_type", "")).strip()
-        self._ensure_worker(normalized, model_root, skill_name=skill_name, task_type=task_type)
+        skills_root = self._require_skills_root(payload)
+        self._ensure_worker(
+            normalized, model_root,
+            skill_name=skill_name, task_type=task_type, skills_root=skills_root,
+        )
         repo_id = normalized["source"]["repo_id"]
         return {
             "status": "ok",
@@ -108,12 +117,16 @@ class _CoordinatorController:
         normalized, model_root = self._resolve_request(payload)
         skill_name = self._require_field(payload, "skill_name")
         task_type = self._require_field(payload, "task_type")
+        skills_root = self._require_skills_root(payload)
         _request_inputs(payload)
         payload = dict(payload)
         payload["backend"] = normalized["backend"]
         payload["model_spec"] = normalized
         payload["request_timeout_seconds"] = _request_timeout_seconds(payload)
-        worker = self._ensure_worker(normalized, model_root, skill_name=skill_name, task_type=task_type)
+        worker = self._ensure_worker(
+            normalized, model_root,
+            skill_name=skill_name, task_type=task_type, skills_root=skills_root,
+        )
         return self._request_worker(worker, payload)
 
     def _resolve_request(self, payload: dict[str, Any]) -> tuple[dict[str, Any], Path]:
@@ -135,8 +148,28 @@ class _CoordinatorController:
             raise ValueError(f"{field} is required")
         return value
 
-    def _ensure_worker(self, normalized: dict[str, Any], model_root: Path, *, skill_name: str, task_type: str = "") -> _WorkerState:
-        """Ensure the correct worker is running, start if needed."""
+    @staticmethod
+    def _require_skills_root(payload: dict[str, Any]) -> str:
+        """Derive the per-request skills_root from the client's workspace_root.
+
+        The workspace is bind-mounted into the sandbox at the same host path,
+        so the client's ``Path.cwd().resolve()`` is a path the coordinator
+        can resolve directly. Requiring it per-request (instead of binding
+        ``skills_root`` to coordinator startup) lets a single global
+        coordinator serve clients from multiple workspaces.
+        """
+        return str(_resolve_service_workspace_root(payload) / "skills")
+
+    def _ensure_worker(
+        self, normalized: dict[str, Any], model_root: Path,
+        *, skill_name: str, task_type: str, skills_root: str,
+    ) -> _WorkerState:
+        """Ensure the correct worker is running, start if needed.
+
+        The worker is keyed on (backend, model_signature, skills_root).
+        Switching workspaces (different ``skills_root``) always restarts
+        the worker, because adapter discovery happens once at worker startup.
+        """
         backend = normalized["backend"]
         repo_id = normalized["source"]["repo_id"]
         signature = model_spec_signature(normalized)
@@ -147,6 +180,7 @@ class _CoordinatorController:
                 and worker.process.poll() is None
                 and worker.backend == backend
                 and worker.model_signature == signature
+                and worker.skills_root == skills_root
             ):
                 self._last_used_at = time.time()
                 return worker
@@ -154,6 +188,7 @@ class _CoordinatorController:
             self._worker_state = self._start_worker(
                 skill_name=skill_name, task_type=task_type, backend=backend, model_id=repo_id,
                 model_signature=signature, model_spec=normalized, model_root=model_root,
+                skills_root=skills_root,
             )
             self._last_used_at = time.time()
             return self._worker_state
@@ -163,6 +198,7 @@ class _CoordinatorController:
     def _start_worker(
         self, *, skill_name: str, task_type: str, backend: str, model_id: str,
         model_signature: str, model_spec: dict[str, Any], model_root: Path,
+        skills_root: str,
     ) -> _WorkerState:
         python_bin = _worker_python(self.service_root / VENVS_SUBDIR / backend)
         cmd = [
@@ -175,9 +211,8 @@ class _CoordinatorController:
             "--backend-mode", self.backend_mode,
             "--model-spec-json", json.dumps(model_spec, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
             "--model-root", str(model_root),
+            "--skills-root", skills_root,
         ]
-        if self.skills_root:
-            cmd.extend(["--skills-root", self.skills_root])
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         hub_root = str(self.service_root / MODELS_SUBDIR)
@@ -225,7 +260,8 @@ class _CoordinatorController:
 
         return _WorkerState(
             backend=backend, model_id=model_id,
-            model_signature=model_signature, process=process,
+            model_signature=model_signature, skills_root=skills_root,
+            process=process,
             stdout_queue=stdout_queue, stderr_lines=stderr_lines,
             stdin_lock=threading.Lock(), started_at=time.time(),
             task_type=task_type,
@@ -395,14 +431,12 @@ class _CoordinatorHandler(BaseHTTPRequestHandler):
 
 
 def _coordinator_main(args) -> int:
-    skills_root = str(getattr(args, "skills_root", "") or "").strip()
     service_root = Path(args.service_root).expanduser().resolve()
     controller = _CoordinatorController(
         service_root=service_root,
         token=str(args.token),
         idle_seconds=int(args.idle_seconds),
         backend_mode=str(args.backend_mode),
-        skills_root=skills_root,
     )
     server = _CoordinatorHTTPServer((str(args.host), int(args.port)), _CoordinatorHandler, controller)
 

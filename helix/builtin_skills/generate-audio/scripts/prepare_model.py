@@ -97,6 +97,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "skill_name": _EXECUTED_SKILL,
         "model_spec": _load_model_spec(),
         "request_timeout_seconds": timeout,
+        "workspace_root": str(Path.cwd().resolve()),
     }
     try:
         status_code, parsed, body = _post_json(

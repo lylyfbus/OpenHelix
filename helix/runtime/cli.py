@@ -3,7 +3,7 @@
 Usage::
 
     helix start searxng
-    helix start local-model-service --workspace ~/agent
+    helix start local-model-service
     helix stop searxng
     helix status
     helix model download --skill generate-image
@@ -31,7 +31,6 @@ from helix.runtime.local_model_service.download import download_model
 def _run_start(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Start a helix service")
     parser.add_argument("service", choices=["searxng", "local-model-service"])
-    parser.add_argument("--workspace", default=".", help="Workspace path (for local-model-service)")
     args = parser.parse_args(argv)
 
     if args.service == "searxng":
@@ -41,8 +40,7 @@ def _run_start(argv: list[str]) -> int:
         return 0
 
     if args.service == "local-model-service":
-        workspace = Path(args.workspace).expanduser().resolve()
-        state = lms_service.start(workspace)
+        state = lms_service.start()
         print(f"Local model service started on port {state['port']}")
         return 0
     return 1

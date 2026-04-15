@@ -344,6 +344,7 @@ The co-located `_runner/<commit>/` subfolder lives next to the model weights, so
 - POST the model_spec and inputs to `/models/prepare` or `/infer` respectively.
 - Include `"skill_name"` in every request payload — the coordinator uses it to route to your adapter.
 - Include `"task_type"` (e.g. `"text_to_image"`) in `/infer` requests.
+- Include `"workspace_root": str(Path.cwd().resolve())` in **both** `/models/prepare` and `/infer` requests. The coordinator is a workspace-agnostic global service: it derives `skills_root` from each request's `workspace_root` so a single running coordinator can serve clients from any workspace. The Docker sandbox bind-mounts the workspace at the same host path, so `Path.cwd().resolve()` inside the container is already a path the host-side coordinator can resolve directly.
 - Print exactly one JSON object to stdout as the final result — the agent reads stdout to know what happened.
 
 The built-in `generate-image` and `generate-video` skills both have working script examples you can copy and adapt.
@@ -357,7 +358,7 @@ The built-in `generate-image` and `generate-video` skills both have working scri
 helix model download --skill my-gen-skill
 
 # 3. Start the coordinator so the agent can use the skill.
-helix start local-model-service --workspace ~/my-agent
+helix start local-model-service
 ```
 
 On the first `/infer` call, the adapter's `_load()` runs: pip-installs `_DEPENDENCIES`, optionally fetches runner files, and loads the model. Subsequent calls reuse the warm worker.

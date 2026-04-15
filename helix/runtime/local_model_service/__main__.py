@@ -20,7 +20,6 @@ def build_parser() -> argparse.ArgumentParser:
     coordinator.add_argument("--token", required=True)
     coordinator.add_argument("--idle-seconds", default=str(DEFAULT_IDLE_SECONDS))
     coordinator.add_argument("--backend-mode", default=DEFAULT_BACKEND_MODE)
-    coordinator.add_argument("--skills-root", default="")
 
     worker = subparsers.add_parser("worker")
     worker.add_argument("--skill-name", required=True)
