@@ -28,7 +28,13 @@ Neither location holds any secrets. Everything is plain files you can read, edit
     project/                                Project repos, apps, code the agent produces
     docs/                                   Plans, research notes, session artifacts
     .state/
-      session_state.json                    Conversation history + workflow summary
+      session_state.json                    Core-agent conversation history + workflow summary
+      sub_agents_meta.json                  Registry of sub-agents created this session
+      sub_agents/
+        {role}.json                         Per-sub-agent persisted state (history, observation, last_prompt)
+      views/
+        {session-id}.{field}.html           HTML snapshots written by /view <field>
+        {session-id}.sub_agent.{role}.{field}.html    HTML snapshots written by /view <field> <role>
 
   .runtime/                                 Runtime scratch space (never committed to git)
     docker/cache/                           Persistent sandbox cache (pip, npm, venv)
@@ -40,7 +46,7 @@ Neither location holds any secrets. Everything is plain files you can read, edit
 **Rules of thumb:**
 
 - **Files you write freely** — `skills/my-*/` (your own skills), `knowledge/**/*.md` (knowledge docs), `sessions/{id}/project/` (whatever the agent is building).
-- **Files you read but shouldn't hand-edit** — `sessions/{id}/.state/session_state.json` (the agent's memory), `.runtime/*` (runtime-managed).
+- **Files you read but shouldn't hand-edit** — `sessions/{id}/.state/` (the agent's memory, including core-agent and sub-agent state), `.runtime/*` (runtime-managed).
 - **Files OpenHelix overwrites on every startup** — `skills/builtin_skills/*`. Put customizations in a copy under `skills/` at the top level instead.
 - **Safe to version-control** — `skills/my-*/`, `knowledge/`, `sessions/{id}/project/`, `sessions/{id}/docs/`.
 - **Should be gitignored** — `.runtime/`, `skills/builtin_skills/` (synced from the package), `sessions/{id}/.state/`.
@@ -79,7 +85,9 @@ Neither location holds any secrets. Everything is plain files you can read, edit
 
 | File | Lives in | Purpose |
 |---|---|---|
-| `sessions/{id}/.state/session_state.json` | workspace | Full conversation history, observation window, compacted workflow summary |
+| `sessions/{id}/.state/session_state.json` | workspace | Core-agent history, observation window, compacted workflow summary |
+| `sessions/{id}/.state/sub_agents_meta.json` | workspace | Registry of sub-agent personas (role + description) created this session |
+| `sessions/{id}/.state/sub_agents/{role}.json` | workspace | Per-sub-agent persisted state (history, observation, last_prompt) — restored on re-delegation to the same role |
 | `.runtime/builtin_skills_manifest.json` | workspace | List of built-in skill names (tracked for clean upgrades) |
 | `~/.helix/services/*/state.json` | global | Service endpoint info (read by `helix status` and auto-discovered on startup) |
 | `knowledge/index.json` | workspace | Global knowledge classification index |

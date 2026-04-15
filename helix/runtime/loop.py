@@ -6,11 +6,9 @@ The entire orchestration reduces to: state → agent → action → environment 
 
 from __future__ import annotations
 
-import json
 import random
 import sys
 import time
-from pathlib import Path
 from typing import Any, TextIO, Callable
 
 from ..core.action import Action, ActionParseError, ALLOWED_SUB_ACTIONS
@@ -18,14 +16,16 @@ from ..core.agent import Agent
 from ..core.environment import Environment, CompactionError, ExecutionInterrupted
 from ..core.state import State, Turn
 from ..providers.openai_compat import LLMTransientError
+from . import sub_agent_meta
 from .display import iter_exec_payload_items, write_runtime
 
 
 DEFAULT_MAX_TURNS = 9999999
-DEFAULT_MAX_RETRIES = 10
-DEFAULT_LLM_RETRIES = 30
-_LLM_RETRY_BASE_DELAY = 2.0
-_LLM_RETRY_MAX_DELAY = 60.0
+DEFAULT_LLM_RETRIES = 20
+DEFAULT_PARSE_RETRIES = 20
+DEFAULT_COMPACTION_RETRIES = 20
+_RETRY_BASE_DELAY = 2.0
+_RETRY_MAX_DELAY = 60.0
 
 
 def run_loop(
@@ -34,7 +34,6 @@ def run_loop(
     *,
     model: Any = None,
     max_turns: int = DEFAULT_MAX_TURNS,
-    max_retries: int = DEFAULT_MAX_RETRIES,
     output: TextIO = sys.stdout,
     on_turn_start: Callable[[str], None] | None = None,
     on_turn_end: Callable[[], None] | None = None,
@@ -47,11 +46,24 @@ def run_loop(
     Runs until the agent emits a "chat" action (returning control to the
     caller) or the turn limit is reached.
 
+    Error handling contract — three error classes, each with its own policy:
+      * ``LLMTransientError`` and ``CompactionError`` are *runtime-handled*:
+        retried at the runtime level with exponential backoff; if retries are
+        exhausted, the error is recorded as a ``runtime`` Turn and the loop
+        returns to the requester (user or parent core-agent) without feeding
+        the error back to the agent. The agent cannot influence infrastructure
+        issues, so retry-and-return is the pragmatic default.
+      * ``ActionParseError`` is *agent-handled*: the first failure is recorded
+        so the agent sees it on the next turn and can adjust its output. After
+        ``DEFAULT_PARSE_RETRIES`` consecutive failures the loop bails out
+        (stuck-state detection, independent of ``max_turns``).
+      * ``ExecutionInterrupted`` is *pass-through*: the observation is recorded
+        and the loop returns immediately so the requester can react.
+
     Args:
         agent: The LLM-based agent.
         env: The sandbox environment.
-        max_turns: Maximum loop iterations before forced stop.
-        max_retries: Maximum consecutive parse failures before forced stop.
+        max_turns: Total iteration budget for this session.
         output: Stream for runtime status messages.
         on_turn_start: Optional callback fired before the agent acts.
         on_turn_end: Optional callback fired after a valid agent output is finalized.
@@ -61,21 +73,22 @@ def run_loop(
     Returns:
         The agent's final response text.
     """
-    consecutive_failures = 0
+    consecutive_parse_failures = 0
 
     for _ in range(max_turns):
-        # 1. Build state from environment (compacts if needed)
+        # 1. Build state from environment (retries compaction internally)
         try:
-            state = env.build_state()
+            state = _build_state_with_retry(env, output=output)
         except CompactionError as exc:
             msg = (
-                f"Session paused: context window is full and compaction failed ({exc}). "
-                f"Please start a new session or reduce context."
+                f"Compaction failed after {DEFAULT_COMPACTION_RETRIES} attempts: {exc}. "
+                "Returning to requester."
             )
             _print(output, f"runtime> {msg}\n")
+            env.record(Turn(role="runtime", content=msg))
             return msg
 
-        # 2. Agent decides
+        # 2. Agent decides (retries transient LLM errors internally)
         if on_turn_start:
             on_turn_start(agent.role)
         try:
@@ -85,21 +98,37 @@ def run_loop(
                 on_turn_error=on_turn_error,
                 output=output,
             )
-            consecutive_failures = 0
+            consecutive_parse_failures = 0
+        except LLMTransientError as exc:
+            msg = (
+                f"LLM provider error after {DEFAULT_LLM_RETRIES} attempts: {exc}. "
+                "Returning to requester."
+            )
+            _print(output, f"runtime> {msg}\n")
+            env.record(Turn(role="runtime", content=msg))
+            return msg
         except ActionParseError as exc:
             if on_turn_error:
                 on_turn_error()
-            consecutive_failures += 1
-            _print(output, f"runtime> Output parse error (attempt {consecutive_failures}/{max_retries}): {exc}\n")
+            consecutive_parse_failures += 1
+            _print(
+                output,
+                f"runtime> Output parse error (attempt "
+                f"{consecutive_parse_failures}/{DEFAULT_PARSE_RETRIES}): {exc}\n",
+            )
             # Record only the first parse error to avoid flooding the observation window.
-            if consecutive_failures == 1:
+            if consecutive_parse_failures == 1:
                 env.record(Turn(
                     role="runtime",
                     content=f"Output parse error: {exc}. Please respond with valid <output>...</output> JSON.",
                 ))
-            if consecutive_failures >= max_retries:
-                msg = "Loop ended: too many consecutive parse failures."
+            if consecutive_parse_failures >= DEFAULT_PARSE_RETRIES:
+                msg = (
+                    f"Loop ended: {DEFAULT_PARSE_RETRIES} consecutive parse failures. "
+                    "Returning to requester."
+                )
                 _print(output, f"runtime> {msg}\n")
+                env.record(Turn(role="runtime", content=msg))
                 return msg
             continue
 
@@ -107,22 +136,34 @@ def run_loop(
         if on_turn_end:
             on_turn_end()
 
-        # 4. Record agent turn with full action details
+        # 4. Gate: the loop only dispatches actions the current agent is
+        # actually allowed to emit. This is the loop's own authoritative
+        # check — anything unexpected gets recorded as a runtime error and
+        # the loop continues so the agent can react on its next turn.
+        if action.type not in agent.allowed_actions:
+            failure = (
+                f"Action {action.type!r} is not allowed for agent role "
+                f"{agent.role!r} (allowed: {sorted(agent.allowed_actions)}). "
+                "Dropping the action and continuing."
+            )
+            _print(output, f"runtime> {failure}\n")
+            env.record(Turn(role="runtime", content=failure))
+            continue
+
+        # 5. Record agent turn with full action details
         record_content = _format_agent_record(action)
         env.record(Turn(
             role=agent.role,
             content=record_content,
         ))
 
-        # 5. Execute action
+        # 6. Execute action
         if action.type == "chat":
             # Done — return to caller
             return action.response
-
-        if action.type == "think":
-            # Loop continues — response already recorded
-            pass
-
+        elif action.type == "think":
+            # Response already recorded; nothing more to do this iteration.
+            continue
         elif action.type == "exec":
             _print(output, f"runtime> Executing: {action.payload.get('job_name', 'unnamed')}...\n")
             try:
@@ -132,14 +173,58 @@ def run_loop(
                 _print(output, f"runtime> {exc.observation.content}\n")
                 return exc.observation.content
             env.record(observation)
-
+            continue
         elif action.type == "delegate":
-            _print(output, f"runtime> Delegating to sub-agent: {action.payload.get('role', 'unknown')}...\n")
-            result = _delegate(action, env, model)
-            env.record(Turn(
-                role="sub_agent",
-                content=result,
-            ))
+            role_name = action.payload.get('role', 'unknown')
+            _print(output, f"runtime> Delegating to sub-agent: {role_name}...\n")
+            # The sub-agent's run_loop handles LLMTransientError, CompactionError,
+            # and ActionParseError internally (recording runtime Turns and
+            # returning a summary string), so only a truly unexpected exception
+            # should reach this catch-all.
+            try:
+                result = _delegate(
+                    action, env, model,
+                    max_turns=max_turns,
+                    output=output,
+                    on_turn_start=on_turn_start,
+                    on_turn_end=on_turn_end,
+                    on_turn_error=on_turn_error,
+                    on_token_chunk=on_token_chunk,
+                )
+                env.record(Turn(role="sub_agent", content=result))
+            except Exception as exc:
+                failure = (
+                    f"Sub-agent {role_name!r} failed with an unexpected error: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                _print(output, f"runtime> {failure}\n")
+                env.record(Turn(role="runtime", content=failure))
+            # Refresh the parent agent's cached sub_agents_meta so the very
+            # next act() in this same run_loop iteration sees the updated
+            # registry — important because the core agent may re-delegate to
+            # the same (or a new) sub-agent multiple times within one user
+            # message, and it needs fresh state on every turn. Runs whether
+            # delegation succeeded or failed, because _delegate's finally
+            # clause may have persisted partial sub-agent state even on error.
+            if env.state_root is not None:
+                agent.set_sub_agents_meta(
+                    sub_agent_meta.format_for_prompt(sub_agent_meta.load(env.state_root))
+                )
+            continue
+        else:
+            # Reached only when action.type is in agent.allowed_actions (step
+            # 4 gate already approved it) but no dispatch branch above matches
+            # it. That means someone extended ALLOWED_*_ACTIONS with a new
+            # type but forgot to add the corresponding elif here. Record the
+            # mismatch as a runtime Turn so the agent and the user can see it.
+            failure = (
+                f"Action {action.type!r} is allowed for agent role "
+                f"{agent.role!r} but has no dispatch handler in run_loop. "
+                "This indicates a missing elif branch in the dispatch chain."
+            )
+            _print(output, f"runtime> {failure}\n")
+            env.record(Turn(role="runtime", content=failure))
+            continue
 
     # Turn limit reached
     msg = "Loop ended: maximum turns reached."
@@ -152,14 +237,37 @@ def run_loop(
 # --------------------------------------------------------------------------- #
 
 
-def _delegate(action: Action, env: Environment, model: Any) -> str:
+def _delegate(
+    action: Action,
+    env: Environment,
+    model: Any,
+    *,
+    max_turns: int = DEFAULT_MAX_TURNS,
+    output: TextIO = sys.stdout,
+    on_turn_start: Callable[[str], None] | None = None,
+    on_turn_end: Callable[[], None] | None = None,
+    on_turn_error: Callable[[], None] | None = None,
+    on_token_chunk: Callable[[str], None] | None = None,
+) -> str:
     """Spawn a sub-agent to handle a delegated task.
 
     Creates an isolated Environment sharing the parent's workspace, executor,
-    compactor, and approval hook, then runs a recursive loop.
+    compactor, and approval hook, then runs a recursive loop. Display
+    callbacks and output stream are forwarded so the sub-agent's runtime
+    messages and streamed responses render in the same UI flow as the core
+    agent — the sub-agent's turns appear under the green `sub_agent` badge
+    because StreamingDisplay.reset() is called with the sub_agent's role on
+    each act.
 
-    If state_root is set on env, sub-agent state is persisted and restored
-    across delegations to the same role.
+    If state_root is set on env, sub-agent state (full history + observation
+    + workflow_summary + last_prompt) is persisted and restored across
+    delegations to the same role.
+
+    Error handling note: the recursive ``run_loop`` call handles
+    ``LLMTransientError``, ``CompactionError``, and ``ActionParseError``
+    internally and returns a summary string in every case. The caller
+    (the ``delegate`` branch in ``run_loop``) only needs a catch-all
+    ``except Exception`` for truly unexpected failures.
     """
     task = action.payload
 
@@ -205,56 +313,30 @@ def _delegate(action: Action, env: Environment, model: Any) -> str:
         allowed_actions=ALLOWED_SUB_ACTIONS,
     )
 
-    result = run_loop(sub_agent, sub_env)
-
-    # Persist sub-agent state and update meta registry
-    if state_root is not None:
-        sub_state_path = state_root / "sub_agents" / f"{role}.json"
-        sub_env.save_session(sub_state_path)
-        _update_sub_agents_meta(state_root, role, role_description)
+    try:
+        result = run_loop(
+            sub_agent,
+            sub_env,
+            model=model,
+            max_turns=max_turns,
+            output=output,
+            on_turn_start=on_turn_start,
+            on_turn_end=on_turn_end,
+            on_turn_error=on_turn_error,
+            on_token_chunk=on_token_chunk,
+        )
+    finally:
+        # Always persist what the sub-agent saw, even on error, so /view
+        # can still inspect the failed sub-agent's last state.
+        if state_root is not None:
+            sub_state_path = state_root / "sub_agents" / f"{role}.json"
+            sub_env.save_session(
+                sub_state_path,
+                extra_fields={"last_prompt": getattr(sub_agent, "last_prompt", "")},
+            )
+            sub_agent_meta.update(state_root, role, role_description)
 
     return result
-
-
-# --------------------------------------------------------------------------- #
-# Sub-agent meta registry
-# --------------------------------------------------------------------------- #
-
-
-def _load_sub_agents_meta(state_root: Path) -> list[dict]:
-    """Load the sub-agents meta registry."""
-    meta_path = state_root / "sub_agents_meta.json"
-    if not meta_path.exists():
-        return []
-    try:
-        data = json.loads(meta_path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        return []
-
-
-def _save_sub_agents_meta(state_root: Path, meta: list[dict]) -> None:
-    """Save the sub-agents meta registry."""
-    meta_path = state_root / "sub_agents_meta.json"
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = meta_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    tmp.replace(meta_path)
-
-
-def _update_sub_agents_meta(state_root: Path, role: str, description: str) -> None:
-    """Add or update a sub-agent entry in the meta registry."""
-    meta = _load_sub_agents_meta(state_root)
-    for entry in meta:
-        if entry.get("role") == role:
-            if description:
-                entry["description"] = description
-            return _save_sub_agents_meta(state_root, meta)
-    meta.append({
-        "role": role,
-        "description": description or f"Sub-agent: {role}",
-    })
-    _save_sub_agents_meta(state_root, meta)
 
 
 def _act_with_retry(
@@ -264,27 +346,65 @@ def _act_with_retry(
     chunk_callback: Callable[[str], None] | None,
     on_turn_error: Callable[[], None] | None,
     output: TextIO,
-    max_retries: int = DEFAULT_LLM_RETRIES,
 ) -> Action:
-    """Call agent.act() with retry on transient LLM errors.
+    """Call ``agent.act()`` with retry on transient LLM errors.
 
-    Retries with exponential backoff + jitter. Does NOT record anything
-    to the environment — the agent never produced output.
+    Retries up to ``DEFAULT_LLM_RETRIES`` times with exponential backoff +
+    jitter. Does NOT record anything to the environment — the agent never
+    produced output. If all retries are exhausted, the final
+    ``LLMTransientError`` is re-raised so the caller (``run_loop``) can
+    record it as a ``runtime`` Turn and return to the requester.
     """
     last_exc: LLMTransientError | None = None
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, DEFAULT_LLM_RETRIES + 1):
         try:
             return agent.act(state, chunk_callback=chunk_callback)
         except LLMTransientError as exc:
             last_exc = exc
             if on_turn_error:
                 on_turn_error()
-            if attempt >= max_retries:
+            if attempt >= DEFAULT_LLM_RETRIES:
                 raise
-            delay = min(_LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1)), _LLM_RETRY_MAX_DELAY) + random.uniform(0, 1)
+            delay = min(_RETRY_BASE_DELAY * (2 ** (attempt - 1)), _RETRY_MAX_DELAY) + random.uniform(0, 1)
             if exc.retry_after is not None:
                 delay = max(delay, exc.retry_after)
-            _print(output, f"runtime> LLM provider error (attempt {attempt}/{max_retries}, retrying in {delay:.1f}s): {exc}\n")
+            _print(
+                output,
+                f"runtime> LLM provider error (attempt {attempt}/{DEFAULT_LLM_RETRIES}, "
+                f"retrying in {delay:.1f}s): {exc}\n",
+            )
+            time.sleep(delay)
+    raise last_exc  # all retries exhausted
+
+
+def _build_state_with_retry(
+    env: Environment,
+    *,
+    output: TextIO,
+) -> State:
+    """Call ``env.build_state()`` with retry on compaction failures.
+
+    Compaction typically invokes the LLM to summarize older turns, so a
+    ``CompactionError`` is usually downstream of a transient provider issue.
+    Retries up to ``DEFAULT_COMPACTION_RETRIES`` times with exponential
+    backoff + jitter. If all retries are exhausted, the final
+    ``CompactionError`` is re-raised so the caller (``run_loop``) can record
+    it as a ``runtime`` Turn and return to the requester.
+    """
+    last_exc: CompactionError | None = None
+    for attempt in range(1, DEFAULT_COMPACTION_RETRIES + 1):
+        try:
+            return env.build_state()
+        except CompactionError as exc:
+            last_exc = exc
+            if attempt >= DEFAULT_COMPACTION_RETRIES:
+                raise
+            delay = min(_RETRY_BASE_DELAY * (2 ** (attempt - 1)), _RETRY_MAX_DELAY) + random.uniform(0, 1)
+            _print(
+                output,
+                f"runtime> Compaction error (attempt {attempt}/{DEFAULT_COMPACTION_RETRIES}, "
+                f"retrying in {delay:.1f}s): {exc}\n",
+            )
             time.sleep(delay)
     raise last_exc  # all retries exhausted
 

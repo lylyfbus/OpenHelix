@@ -66,10 +66,15 @@ def _write_role_block(role: str, text: str, output: TextIO) -> None:
     output.flush()
 
 
-def write_agent(text: str, output: Optional[TextIO] = None) -> None:
-    """Write agent output with blue badge prefix."""
+def write_agent(text: str, output: Optional[TextIO] = None, *, role: str = "core_agent") -> None:
+    """Write agent output with the role's badge prefix.
+
+    The role argument selects the badge color — `core_agent` gets the blue
+    badge, `sub_agent` gets the green badge. Any unknown role falls back to
+    the default bold.
+    """
     stream = output if output is not None else sys.stdout
-    _write_role_block("core_agent", text, stream)
+    _write_role_block(role, text, stream)
 
 
 def write_runtime(text: str, output: Optional[TextIO] = None) -> None:
@@ -207,7 +212,11 @@ class StreamingDisplay:
         if not self._response_text:
             return
         output = self._output if self._output is not None else sys.stdout
-        write_agent(f"{self._current_name}> {self._response_text}", output)
+        write_agent(
+            f"{self._current_name}> {self._response_text}",
+            output,
+            role=self._current_name,
+        )
 
     def discard(self) -> None:
         """Drop any buffered response from a failed parse attempt."""

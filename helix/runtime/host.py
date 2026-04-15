@@ -35,6 +35,7 @@ from ..providers.openai_compat import LLMProvider
 from ..services.searxng import discover as discover_searxng
 from ..services.local_model_service import discover as discover_lms
 from .loop import run_loop
+from . import sub_agent_meta
 from .approval import ApprovalPolicy
 from .display import StreamingDisplay, write_runtime
 from .debug import render_session_view_html, open_file_in_viewer
@@ -102,10 +103,12 @@ class RuntimeHost:
 
     HELP_TEXT = "\n".join([
         "Commands:",
-        "  /help            Show this help.",
-        "  /status          Show session status.",
-        "  /view <field>    Open a session view. Fields: full_history, observation, workflow_summary, last_prompt.",
-        "  /exit            Quit.",
+        "  /help                        Show this help.",
+        "  /status                      Show session status.",
+        "  /view <field>                Inspect the main session (fields: " + ", ".join(_VIEW_FIELDS) + ").",
+        "  /view <field> <role>         Inspect a sub-agent's field by role.",
+        "  /view sub_agents             List all sub-agents created in this session.",
+        "  /exit                        Quit.",
     ])
 
     def __init__(
@@ -156,7 +159,9 @@ class RuntimeHost:
             session_root=self.session_root,
             project_root=self.project_root,
             docs_root=self.docs_root,
-            sub_agents_meta=self._build_sub_agents_meta_text(),
+            sub_agents_meta=sub_agent_meta.format_for_prompt(
+                sub_agent_meta.load(self.state_root)
+            ),
         )
 
         # 4. Discover services (started via `helix start`)
@@ -366,9 +371,10 @@ class RuntimeHost:
             write_runtime(f"runtime> {message}", sys.stdout)
             self._env.record(Turn(role="runtime", content=message))
         finally:
-            # Persist state and refresh sub-agents meta for next turn
+            # The loop already refreshes sub_agents_meta on the agent
+            # immediately after each delegation, so we only need to persist
+            # session state here.
             self._persist_session()
-            self._agent._workspace_prompt_args["sub_agents_meta"] = self._build_sub_agents_meta_text()
 
     def _handle_command(self, command_line: str) -> Optional[str]:
         """Process slash commands. Returns None for exit, string for output."""
@@ -383,10 +389,24 @@ class RuntimeHost:
             return self._status_text()
         if cmd == "/view":
             if len(parts) < 2:
-                return f"Usage: /view <field>. Fields: {', '.join(self._VIEW_FIELDS)}"
+                return (
+                    "Usage:\n"
+                    "  /view <field>               Inspect main session\n"
+                    "  /view <field> <role>        Inspect a sub-agent's field by role\n"
+                    "  /view sub_agents            List sub-agents in this session\n"
+                    f"Fields: {', '.join(self._VIEW_FIELDS)}"
+                )
             field = parts[1].lower()
+            if field == "sub_agents":
+                return self._list_sub_agents()
             if field not in self._VIEW_FIELDS:
-                return f"Unknown field: {field!r}. Fields: {', '.join(self._VIEW_FIELDS)}"
+                return (
+                    f"Unknown field: {field!r}. "
+                    f"Fields: {', '.join(self._VIEW_FIELDS)}. "
+                    "Use '/view sub_agents' to list sub-agents."
+                )
+            if len(parts) >= 3:
+                return self._open_sub_agent_field_view(parts[2], field)
             return self._open_session_field_view(field)
         return f"Unknown command: {cmd}. Use /help."
 
@@ -426,48 +446,89 @@ class RuntimeHost:
         except Exception:
             pass
 
-    def _open_session_field_view(self, field: str) -> str:
-        """Persist and open a field-specific HTML view for the current session."""
-        self._persist_session()
-        raw_session = self._read_session_payload(self.session_state_path)
+    def _open_field_view(
+        self,
+        *,
+        field: str,
+        session_path: Path,
+        view_id: str,
+        view_filename: str,
+        description: str,
+    ) -> str:
+        """Read a JSON session file, render a field-specific HTML view, and open it.
+
+        ``description`` is a short lowercase noun ("session view",
+        "sub-agent view") used in the success message.
+        """
+        raw_session = self._read_session_payload(session_path)
         if raw_session is None:
-            return f"Unable to read session file: {self.session_state_path}"
+            return f"Unable to read state file: {session_path}"
 
         value = raw_session.get(field, "(missing)")
         if field == "last_prompt" and not str(value):
             value = "(none yet)"
         html = render_session_view_html(
-            session_id=self.session_id,
+            session_id=view_id,
             field=field,
-            session_path=self.session_state_path,
+            session_path=session_path,
             value=value,
         )
 
         view_dir = self.state_root / "views"
         view_dir.mkdir(parents=True, exist_ok=True)
-        view_path = (view_dir / f"{self.session_id}.{field}.html").resolve()
+        view_path = (view_dir / view_filename).resolve()
         view_path.write_text(html, encoding="utf-8")
 
         if open_file_in_viewer(view_path):
-            return f"Opened session view: {view_path}"
-        return f"Session view written: {view_path}"
+            return f"Opened {description}: {view_path}"
+        return f"{description.capitalize()} written: {view_path}"
+
+    def _open_session_field_view(self, field: str) -> str:
+        """Persist and open a field-specific HTML view for the current session."""
+        self._persist_session()
+        return self._open_field_view(
+            field=field,
+            session_path=self.session_state_path,
+            view_id=self.session_id,
+            view_filename=f"{self.session_id}.{field}.html",
+            description="session view",
+        )
+
+    def _list_sub_agents(self) -> str:
+        """List sub-agents persisted under this session's state_root."""
+        meta = sub_agent_meta.load(self.state_root)
+        if not meta:
+            return "No sub-agents have been created in this session yet."
+        lines = ["Sub-agents (use `/view <field> <role>` to inspect):"]
+        for entry in meta:
+            role = entry.get("role", "?")
+            desc = entry.get("description", "") or "(no description)"
+            state_file = self.state_root / "sub_agents" / f"{role}.json"
+            marker = "persisted" if state_file.exists() else "no state yet"
+            lines.append(f"  {role}: {desc} [{marker}]")
+        return "\n".join(lines)
+
+    def _open_sub_agent_field_view(self, role: str, field: str) -> str:
+        """Open an HTML view for a specific sub-agent's field."""
+        sub_state_path = (self.state_root / "sub_agents" / f"{role}.json").resolve()
+        if not sub_state_path.exists():
+            return (
+                f"No state file for sub-agent {role!r} at {sub_state_path}. "
+                "Use '/view sub_agents' to list available sub-agents."
+            )
+        return self._open_field_view(
+            field=field,
+            session_path=sub_state_path,
+            view_id=f"{self.session_id}.sub_agent.{role}",
+            view_filename=f"{self.session_id}.sub_agent.{role}.{field}.html",
+            description="sub-agent view",
+        )
 
     def _persist_session(self) -> None:
         """Persist session state when a named session is active."""
         self._env.save_session(
             self.session_state_path,
             extra_fields={"last_prompt": getattr(self._agent, "last_prompt", "")}
-        )
-
-    def _build_sub_agents_meta_text(self) -> str:
-        """Build sub-agents meta text for the core agent prompt."""
-        from .loop import _load_sub_agents_meta
-        meta = _load_sub_agents_meta(self.state_root)
-        if not meta:
-            return ""
-        return "\n".join(
-            f"- {entry['role']}: {entry.get('description', '')}"
-            for entry in meta
         )
 
     def _session_state(self) -> str:

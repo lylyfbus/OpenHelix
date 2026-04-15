@@ -219,6 +219,15 @@ class Agent:
         }
         self.system_prompt = ""
 
+    def set_sub_agents_meta(self, meta_text: str) -> None:
+        """Replace the cached sub_agents_meta used in the next system prompt build.
+
+        Called by the runtime loop immediately after a delegate action so the
+        core agent sees an updated registry on its very next turn, including
+        when delegation happens multiple times within a single user message.
+        """
+        self._workspace_prompt_args["sub_agents_meta"] = meta_text
+
     def act(
         self,
         state: State,

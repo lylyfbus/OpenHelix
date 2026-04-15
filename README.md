@@ -141,8 +141,12 @@ Everything is inspectable. `/view last_prompt` shows the exact text sent to the 
 |---|---|
 | `/help` | Show all commands |
 | `/status` | Show the session configuration |
-| `/view <field>` | Inspect `full_history`, `observation`, `workflow_summary`, or `last_prompt` |
+| `/view <field>` | Inspect core-agent state: `full_history`, `observation`, `workflow_summary`, or `last_prompt` |
+| `/view sub_agents` | List sub-agents created in this session |
+| `/view <field> <role>` | Inspect a specific sub-agent's state by role |
 | `/exit` | Quit |
+
+Sub-agents are spawned when the core-agent chooses a `delegate` action. Each sub-agent persists its full history, observation window, workflow summary, and last prompt across delegations to the same role, so you can drill into exactly what the sub-agent saw on any past turn.
 
 ## Documentation
 
