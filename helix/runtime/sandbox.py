@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -121,6 +122,9 @@ class DockerSandboxExecutor:
         self._ensure_image()
         self._ensure_network()
         self._ensure_cache_dir()
+        self._ensure_passwd_files()
+        self._ensure_ssh_sources()
+        self._ensure_gitconfig()
         self._runtime_prepared = True
 
     def shutdown(self) -> None:
@@ -189,6 +193,69 @@ class DockerSandboxExecutor:
         if inspect.returncode == 0:
             return
         _run_docker(["network", "create", self.network_name], timeout=30)
+
+    def _ensure_passwd_files(self) -> None:
+        # OpenSSH refuses to run if getpwuid(geteuid()) returns NULL, which
+        # happens in the container when --user is a UID the base image doesn't
+        # know about. We generate a minimal /etc/passwd and /etc/group that map
+        # the host UID/GID to a usable entry with $HOME pointing at the
+        # cache-backed home directory, and bind-mount them read-only over the
+        # base files.
+        uid = os.getuid()
+        gid = os.getgid()
+        passwd_content = (
+            "root:x:0:0:root:/root:/bin/bash\n"
+            f"helix:x:{uid}:{gid}:helix:/helix-cache/home:/bin/bash\n"
+        )
+        group_content = (
+            "root:x:0:\n"
+            f"helix:x:{gid}:\n"
+        )
+        passwd_file = self.cache_dir / "passwd"
+        group_file = self.cache_dir / "group"
+        if not passwd_file.exists() or passwd_file.read_text(encoding="utf-8") != passwd_content:
+            passwd_file.write_text(passwd_content, encoding="utf-8")
+        if not group_file.exists() or group_file.read_text(encoding="utf-8") != group_content:
+            group_file.write_text(group_content, encoding="utf-8")
+
+    def _ensure_ssh_sources(self) -> None:
+        # Copy the host's ~/.ssh into the cache-backed home directory so the
+        # agent can speak SSH to GitHub. We can't bind-mount the host dir
+        # directly because (a) nested bind mounts inside the /helix-cache mount
+        # don't play well with Docker Desktop on macOS, and (b) the host's
+        # ssh_config may contain macOS-only options like `UseKeychain` that
+        # Linux OpenSSH rejects as fatal parse errors. The copy strips those.
+        host_ssh = Path.home() / ".ssh"
+        if not host_ssh.is_dir():
+            return
+        target = self.cache_dir / "home" / ".ssh"
+        target.mkdir(parents=True, exist_ok=True)
+        target.chmod(0o700)
+        for item in host_ssh.iterdir():
+            if not item.is_file():
+                continue
+            dest = target / item.name
+            if item.name == "config":
+                text = item.read_text(encoding="utf-8", errors="replace")
+                filtered = [
+                    line for line in text.splitlines()
+                    if not re.match(r"\s*UseKeychain\b", line, re.IGNORECASE)
+                ]
+                dest.write_text("\n".join(filtered) + "\n", encoding="utf-8")
+            else:
+                dest.write_bytes(item.read_bytes())
+            dest.chmod(item.stat().st_mode & 0o777)
+
+    def _ensure_gitconfig(self) -> None:
+        # Copy the host's ~/.gitconfig into the cache-backed home so commits
+        # carry the user's identity and any configured credential helpers or
+        # aliases are available inside the sandbox.
+        host_gitconfig = Path.home() / ".gitconfig"
+        if not host_gitconfig.is_file():
+            return
+        target = self.cache_dir / "home" / ".gitconfig"
+        target.write_bytes(host_gitconfig.read_bytes())
+        target.chmod(host_gitconfig.stat().st_mode & 0o777)
 
     def _ensure_cache_dir(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -314,7 +381,16 @@ class DockerSandboxExecutor:
             "--workdir", str(workspace_root),
             "--mount", f"type=bind,src={workspace_root},dst={workspace_root}",
             "--mount", f"type=bind,src={self.cache_dir},dst=/helix-cache",
+            "--mount", f"type=bind,src={self.cache_dir / 'passwd'},dst=/etc/passwd,readonly",
+            "--mount", f"type=bind,src={self.cache_dir / 'group'},dst=/etc/group,readonly",
         ]
+        # Note: the host's ~/.ssh and ~/.gitconfig are copied into
+        # {cache_dir}/home/ during prepare_runtime (_ensure_ssh_sources,
+        # _ensure_gitconfig). Those files are visible inside the container at
+        # /helix-cache/home/.ssh and /helix-cache/home/.gitconfig via the
+        # existing /helix-cache bind mount — no additional mounts needed, and
+        # the copy strips macOS-only options like `UseKeychain` that Linux
+        # OpenSSH rejects.
         if sys.platform.startswith("linux"):
             args.extend(["--add-host", "host.docker.internal:host-gateway"])
         for key, value in sorted(env.items()):

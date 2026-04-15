@@ -102,6 +102,80 @@ Now the agent can use generative skills like `generate-image`.
 helix status
 ```
 
+## Letting the Agent Push to GitHub
+
+OpenHelix runs agent scripts in a Docker sandbox with strong isolation — `--read-only` root filesystem, capabilities dropped, no new privileges, network restricted to a dedicated bridge, runs as your host user. By default the container has **no credentials** for any external service, so `git push` against a GitHub URL fails. If you want the agent to be able to commit and push on your behalf, here are the two supported workflows.
+
+### Option A: SSH (shares your host ~/.ssh)
+
+If you already have SSH keys set up for GitHub on the host, the sandbox can use them directly. On startup, the sandbox:
+
+1. Installs `openssh-client` in the image.
+2. Copies your `~/.ssh` directory and `~/.gitconfig` file into the container's `$HOME` (`/helix-cache/home`), stripping macOS-only config options like `UseKeychain` that Linux OpenSSH rejects.
+3. Generates a minimal `/etc/passwd` and `/etc/group` that map your host UID/GID to a valid user entry so OpenSSH can look up `getpwuid()`.
+
+All of this happens automatically on first `helix` launch after the sandbox rebuild — no flags to pass. Inside a session, the agent can then run:
+
+```bash
+git clone git@github.com:you/your-repo.git
+cd your-repo
+# ...edit files...
+git commit -m "..."
+git push origin master
+```
+
+If you have `Host` aliases in your `~/.ssh/config` (e.g. `github-work` with a per-account `IdentityFile`), those work too:
+
+```bash
+git push git@github-work:org/repo.git master
+```
+
+**Security posture.** This gives the container full git authority as you — the agent can in principle push to **any** GitHub repo your SSH keys can reach, not just the one you're currently working on. The `--mode controlled` approval system is the primary safety net: with it enabled (the default), you see and approve every `git push` command before it runs. **Do not run in `--mode auto` with SSH keys accessible.**
+
+### Option B: HTTPS token (scoped, per-repo)
+
+If you want a narrower blast radius, use a GitHub personal access token instead. The sandbox already forwards any host environment variable prefixed with `SANDBOX_` into the container (stripping the prefix), so no sandbox config changes are needed.
+
+1. Go to https://github.com/settings/tokens?type=beta → "Generate new token" → **fine-grained personal access token**.
+2. Set **Repository access** → **Only select repositories** → choose the exact repo(s) you want the agent to touch.
+3. Set **Repository permissions** → **Contents: Read and write** (and any other minimal scopes you need).
+4. Set an **expiration date** (30 days is a sensible default).
+5. Copy the generated token.
+
+On your host, before launching OpenHelix:
+
+```bash
+export SANDBOX_GH_TOKEN=github_pat_11AB...
+helix --endpoint-url ... --model ... --workspace ~/agent --session-id ...
+```
+
+Inside a session, the agent can then push over HTTPS:
+
+```bash
+git push https://x-access-token:$GH_TOKEN@github.com/owner/repo.git master
+```
+
+Or configure a remote once per repo:
+
+```bash
+git remote set-url origin https://github.com/owner/repo.git
+git -c "http.extraheader=Authorization: Bearer $GH_TOKEN" push origin master
+```
+
+**Security posture.** Much narrower than SSH: if the token leaks (e.g. through a prompt-injected agent dump), the blast radius is exactly the repos and permissions you scoped it to, and you can revoke a single token without touching any other credentials. You still need `--mode controlled` as the first line of defence, but the token scope is a real second line.
+
+### Which one to pick
+
+| Goal | Pick |
+|---|---|
+| "I just want it to work, I trust the approval prompts" | **SSH** (Option A) — zero setup, reuses your existing keys |
+| "Agent should only touch one specific repo" | **HTTPS token** (Option B) — fine-grained scope |
+| "Agent needs to push to both `lylyf1987` and `lylyfbus` accounts in the same session" | **SSH** — one `Host` alias per account in your `~/.ssh/config` |
+| "This is running unattended (CI-style) and I can't interactively approve" | **HTTPS token in a scoped, short-lived token** — never SSH, and never `--mode auto` with SSH keys in scope |
+| "I want defence in depth" | Both — SSH for interactive sessions, HTTPS token for unattended |
+
+Regardless of which you pick, **`--mode controlled` (the default) is the single most important safety control.** It gives you a human-readable preview of every bash/python command the agent wants to run before it executes, and you can deny anything that looks wrong.
+
 ## Next Steps
 
 - [Introduction](introduction.md) — core concepts and design philosophy

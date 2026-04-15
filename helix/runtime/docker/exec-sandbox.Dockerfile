@@ -12,6 +12,7 @@ RUN apt-get update \
         git \
         nodejs \
         npm \
+        openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
