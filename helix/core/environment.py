@@ -62,7 +62,7 @@ class Environment:
         workspace: Path,
         *,
         mode: str = "controlled",
-        token_limit: int = int(100_000 * 0.75),
+        token_limit: int = int(50_000 * 0.75),
         keep_last_k: int = 10,
         executor: Optional[SandboxExecutor] = None,
         compactor: Optional[Compactor] = None,
@@ -142,6 +142,12 @@ class Environment:
             observation=list(self.observation),
             workflow_summary=self.workflow_summary,
         )
+
+    def will_compact(self) -> bool:
+        """True if the next build_state() will invoke the compactor."""
+        if self._estimate_tokens_for_turns(self.observation) <= self.token_limit:
+            return False
+        return len(self.observation) > self.keep_last_k
 
     # ----- Execution ------------------------------------------------------- #
 

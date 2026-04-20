@@ -391,6 +391,9 @@ def _build_state_with_retry(
     ``CompactionError`` is re-raised so the caller (``run_loop``) can record
     it as a ``runtime`` Turn and return to the requester.
     """
+    if env.will_compact():
+        _print(output, "runtime> Context window full — compacting older chat history...\n")
+
     last_exc: CompactionError | None = None
     for attempt in range(1, DEFAULT_COMPACTION_RETRIES + 1):
         try:

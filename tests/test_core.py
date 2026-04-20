@@ -209,6 +209,27 @@ def test_environment_compaction():
         print("  Compaction OK")
 
 
+def test_environment_will_compact():
+    """will_compact() predicts whether the next build_state() will invoke the compactor."""
+    with tempfile.TemporaryDirectory() as td:
+        # Case 1: observation fits within token budget → no compaction.
+        env = Environment(workspace=Path(td), token_limit=200, keep_last_k=2)
+        env.record(Turn(role="user", content="small"))
+        assert env.will_compact() is False
+
+        # Case 2: observation exceeds budget AND len(obs) > keep_last_k → compaction.
+        env = Environment(workspace=Path(td), token_limit=200, keep_last_k=2)
+        for i in range(20):
+            env.record(Turn(role="agent", content=f"Turn {i} " + "x" * 100))
+        assert env.will_compact() is True
+
+        # Case 3: observation exceeds budget but len(obs) <= keep_last_k → nothing to compact.
+        env = Environment(workspace=Path(td), token_limit=50, keep_last_k=2)
+        env.record(Turn(role="user", content="x" * 400))
+        assert env.will_compact() is False
+        print("  will_compact OK")
+
+
 def test_agent_messages_structured_context():
     state = State(
         observation=[
@@ -326,6 +347,72 @@ def test_run_loop_compaction_failure_records_runtime_turn():
     finally:
         loop_module.DEFAULT_COMPACTION_RETRIES = original_retries
 
+
+def test_run_loop_notifies_on_compaction_start():
+    """When compaction is about to run, the user sees a 'Context window full' notice."""
+
+    class SuccessfulCompactorModel:
+        def generate(self, messages, *, chunk_callback=None):
+            return "## Session Goal\nTest\n## Current Status\nCompacted."
+
+    class ChatAgentModel:
+        def generate(self, messages, *, chunk_callback=None):
+            return '<output>{"response": "done", "action": "chat", "action_input": {}}</output>'
+
+    with tempfile.TemporaryDirectory() as td:
+        env = Environment(workspace=Path(td), token_limit=200, keep_last_k=2,
+                          compactor=Compactor(SuccessfulCompactorModel()))
+        for i in range(20):
+            env.record(Turn(role="agent", content=f"Turn {i} " + "x" * 100))
+
+        agent = Agent(ChatAgentModel(), workspace=Path(td))
+        captured = StringIO()
+        run_loop(agent, env, output=captured)
+
+        output_text = captured.getvalue().lower()
+        assert "context window full" in output_text
+        assert "compacting older chat history" in output_text
+        print("  run_loop (compaction-start notification) OK")
+
+
+def test_run_loop_compaction_notification_fires_once_per_turn():
+    """The 'Context window full' notice appears once per turn, not once per retry."""
+
+    class FailingCompactorModel:
+        def generate(self, messages, *, chunk_callback=None):
+            raise RemoteDisconnected("compactor closed connection")
+
+    class UnusedAgentModel:
+        def generate(self, messages, *, chunk_callback=None):
+            assert False, "Agent model should not be called when compaction fails"
+
+    from helix.runtime import loop as loop_module
+    original_retries = loop_module.DEFAULT_COMPACTION_RETRIES
+    original_base_delay = loop_module._RETRY_BASE_DELAY
+    loop_module.DEFAULT_COMPACTION_RETRIES = 3
+    loop_module._RETRY_BASE_DELAY = 0.0  # make the test fast
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            env = Environment(workspace=Path(td), token_limit=10, keep_last_k=1,
+                              compactor=Compactor(FailingCompactorModel()))
+            env.record(Turn(role="user", content="x" * 120))
+            env.record(Turn(role="runtime", content="y" * 120))
+
+            agent = Agent(UnusedAgentModel(), workspace=Path(td))
+            captured = StringIO()
+            run_loop(agent, env, output=captured)
+
+            output_text = captured.getvalue().lower()
+            assert output_text.count("context window full") == 1, (
+                f"expected exactly one compaction-start notice, got "
+                f"{output_text.count('context window full')}:\n{output_text}"
+            )
+            # Retry/failure messages should still be present (shows we did retry).
+            assert "compaction error" in output_text
+            print("  run_loop (notification fires once per turn) OK")
+    finally:
+        loop_module.DEFAULT_COMPACTION_RETRIES = original_retries
+        loop_module._RETRY_BASE_DELAY = original_base_delay
 
 
 def test_run_loop_chat():
@@ -610,6 +697,7 @@ if __name__ == "__main__":
     test_environment_dual_history()
     test_environment_build_state()
     test_environment_compaction()
+    test_environment_will_compact()
     test_agent_messages_structured_context()
     test_environment_compaction_error()
     test_environment_persistence()
@@ -622,6 +710,8 @@ if __name__ == "__main__":
     test_run_loop_exec_denied_returns_control()
     test_run_loop_exec_cancelled_returns_control()
     test_run_loop_compaction_failure_records_runtime_turn()
+    test_run_loop_notifies_on_compaction_start()
+    test_run_loop_compaction_notification_fires_once_per_turn()
 
     print("\n=== LLM Provider Retry ===")
     test_run_loop_transient_error_retries_then_succeeds()
