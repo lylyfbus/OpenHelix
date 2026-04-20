@@ -9,3 +9,4 @@ build/
 # Workspace runtime artifacts (created by bootstrap)
 sessions/
 .session/
+.tmp-helix-debug/
