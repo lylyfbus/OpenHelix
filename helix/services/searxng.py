@@ -1,104 +1,98 @@
-"""SearXNG search service management.
+"""SearXNG search service management (pip/venv backend).
 
 Usage:
-    helix start searxng    Start the SearXNG container
-    helix stop searxng     Stop the SearXNG container
+    helix start searxng    Bootstrap if needed, then launch SearXNG as a
+                           host-level Python subprocess.
+    helix stop searxng     Signal and remove the managed subprocess.
+
+The service is managed entirely on the host — no Docker required. On first
+``start``, SearXNG is cloned from GitHub into ``~/.helix/services/searxng/
+source`` and installed editable into ``~/.helix/services/searxng/venv``
+(this takes a few minutes). Subsequent starts are instant.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import sys
 import time
+import venv
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import urlopen
 
 from helix.constants import SERVICES_ROOT
 
-_SEARXNG_IMAGE = "docker.io/searxng/searxng:latest"
-_NETWORK_NAME = "helix-sandbox-net"
-_CONTAINER_NAME = "helix-searxng"
-_BASE_URL = f"http://{_CONTAINER_NAME}:8080"
-_BUILD_TIMEOUT = 1800
-_READY_TIMEOUT = 30
+
+# ----- Configuration -------------------------------------------------------- #
+
+_SEARXNG_REPO = "https://github.com/searxng/searxng.git"
+_PORT = 8888
+_BASE_URL = f"http://127.0.0.1:{_PORT}"
+_READY_TIMEOUT = 60
 _READY_POLL = 1.0
+_SHUTDOWN_POLL = 0.5
+_SHUTDOWN_GRACE_SECONDS = 10
+_SUPPORT_DEPS = (
+    "pip",
+    "setuptools",
+    "wheel",
+    "pyyaml",
+    "msgspec",
+    "typing-extensions",
+    "pybind11",
+)
+
+
+# ----- Disk layout ---------------------------------------------------------- #
+
 _SERVICE_DIR = SERVICES_ROOT / "searxng"
 _STATE_PATH = _SERVICE_DIR / "state.json"
+_SOURCE_DIR = _SERVICE_DIR / "source"
+_VENV_DIR = _SERVICE_DIR / "venv"
 _CONFIG_DIR = _SERVICE_DIR / "config"
 _DATA_DIR = _SERVICE_DIR / "data"
 
 
-def start() -> dict[str, str]:
-    """Start the SearXNG container and write state.json.
+# ----- Public API ----------------------------------------------------------- #
 
-    Returns the service state dict.
+
+def start() -> dict[str, Any]:
+    """Bootstrap (if needed) and launch SearXNG; write state.json.
+
+    If SearXNG is already running (state file valid, PID alive), return
+    the existing state dict without relaunching.
     """
-    _ensure_network()
-    _ensure_image()
-    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    existing = discover()
+    if existing is not None:
+        return existing
+
+    _SERVICE_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not (_SOURCE_DIR / ".git").exists():
+        print("Bootstrapping SearXNG source (first run; may take a few minutes)...")
+    _ensure_source(_SOURCE_DIR)
+    python_bin = _ensure_venv(_VENV_DIR)
+    _ensure_deps(python_bin, _SOURCE_DIR)
+    _write_settings(_CONFIG_DIR)
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _write_settings()
 
-    # Check if already running
-    inspect = _run_docker(
-        ["inspect", "-f", "{{.State.Running}}", _CONTAINER_NAME],
-        check=False,
-    )
-    if inspect.returncode == 0 and inspect.stdout.strip() == "true":
-        _wait_ready()
-        return _write_state()
-    if inspect.returncode == 0:
-        _run_docker(["rm", "-f", _CONTAINER_NAME], check=False)
-
-    _run_docker(
-        [
-            "run", "-d",
-            "--name", _CONTAINER_NAME,
-            "--restart", "unless-stopped",
-            "--network", _NETWORK_NAME,
-            "-v", f"{_CONFIG_DIR}:/etc/searxng",
-            "-v", f"{_DATA_DIR}:/var/cache/searxng",
-            _SEARXNG_IMAGE,
-        ],
-        timeout=_BUILD_TIMEOUT,
-    )
-    _wait_ready()
-    return _write_state()
-
-
-def stop() -> None:
-    """Stop the SearXNG container and remove state.json."""
-    _run_docker(["rm", "-f", _CONTAINER_NAME], check=False, timeout=30)
-    _STATE_PATH.unlink(missing_ok=True)
-
-
-def discover() -> dict[str, Any] | None:
-    """Check if SearXNG is running. Returns state dict or None."""
-    if not _STATE_PATH.exists():
-        return None
+    pid = _spawn(python_bin, _CONFIG_DIR / "settings.yml", _DATA_DIR)
     try:
-        state = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    # Verify container is actually running
-    inspect = _run_docker(
-        ["inspect", "-f", "{{.State.Running}}", state.get("container_name", "")],
-        check=False,
-    )
-    if inspect.returncode == 0 and inspect.stdout.strip() == "true":
-        return state
-    # Stale state
-    _STATE_PATH.unlink(missing_ok=True)
-    return None
+        _wait_ready(_PORT)
+    except Exception:
+        # Readiness probe failed; try to kill the child we just spawned so
+        # we don't leave a half-dead process behind.
+        _kill_pid(pid)
+        raise
 
-
-# ----- Internal --------------------------------------------------------- #
-
-
-def _write_state() -> dict[str, Any]:
-    state = {
-        "container_name": _CONTAINER_NAME,
-        "network_name": _NETWORK_NAME,
+    state: dict[str, Any] = {
+        "pid": int(pid),
+        "port": _PORT,
         "base_url": _BASE_URL,
         "started_at": time.time(),
     }
@@ -107,74 +101,90 @@ def _write_state() -> dict[str, Any]:
     return state
 
 
-def _run_docker(
-    args: list[str], *, check: bool = True, timeout: int = _BUILD_TIMEOUT,
-) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
-        ["docker", *args],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, timeout=timeout, check=False,
+def stop() -> None:
+    """Signal the managed SearXNG subprocess and remove state.json."""
+    if not _STATE_PATH.exists():
+        return
+    try:
+        state = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _STATE_PATH.unlink(missing_ok=True)
+        return
+
+    pid = state.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        _kill_pid(pid)
+    _STATE_PATH.unlink(missing_ok=True)
+
+
+def discover() -> dict[str, Any] | None:
+    """Return the state dict iff SearXNG is running; else clean up stale state."""
+    if not _STATE_PATH.exists():
+        return None
+    try:
+        state = json.loads(_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _STATE_PATH.unlink(missing_ok=True)
+        return None
+
+    pid = state.get("pid")
+    if not isinstance(pid, int) or pid <= 0 or not _pid_alive(pid):
+        _STATE_PATH.unlink(missing_ok=True)
+        return None
+    return state
+
+
+# ----- Bootstrap helpers ---------------------------------------------------- #
+
+
+def _ensure_source(source_root: Path) -> None:
+    """Clone the SearXNG source tree if not already present."""
+    if (source_root / ".git").exists():
+        return
+    source_root.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", "--depth=1", _SEARXNG_REPO, str(source_root)],
+        check=True,
     )
-    if check and completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise RuntimeError(detail or f"docker {' '.join(args)} failed")
-    return completed
 
 
-def _ensure_network() -> None:
-    inspect = _run_docker(["network", "inspect", _NETWORK_NAME], check=False)
-    if inspect.returncode == 0:
-        return
-    created = _run_docker(["network", "create", _NETWORK_NAME], check=False, timeout=30)
-    if created.returncode == 0:
-        return
-    detail = (created.stderr or created.stdout or "").strip().lower()
-    if "fully subnetted" in detail:
-        _cleanup_unused_networks()
-        created = _run_docker(["network", "create", _NETWORK_NAME], check=False, timeout=30)
-        if created.returncode == 0:
-            return
-    detail = (created.stderr or created.stdout or "").strip()
-    raise RuntimeError(detail or f"docker network create {_NETWORK_NAME} failed")
+def _ensure_venv(venv_root: Path) -> Path:
+    """Create a Python venv for SearXNG if not present; return its python binary."""
+    python_bin = venv_root / "bin" / "python"
+    if python_bin.exists():
+        return python_bin
+    venv_root.mkdir(parents=True, exist_ok=True)
+    builder = venv.EnvBuilder(with_pip=True, clear=False)
+    builder.create(str(venv_root))
+    return python_bin
 
 
-def _cleanup_unused_networks() -> None:
-    listed = _run_docker(["network", "ls", "--format", "{{.Name}}"], check=False, timeout=30)
-    if listed.returncode != 0:
-        return
-    for raw_name in listed.stdout.splitlines():
-        name = raw_name.strip()
-        if not name.startswith(_NETWORK_NAME) or name == _NETWORK_NAME:
-            continue
-        inspect = _run_docker(["network", "inspect", name], check=False, timeout=30)
-        if inspect.returncode != 0:
-            continue
-        try:
-            payload = json.loads(inspect.stdout)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, list) or not payload:
-            continue
-        network = payload[0] if isinstance(payload[0], dict) else {}
-        containers = network.get("Containers") or {}
-        if isinstance(containers, dict) and containers:
-            continue
-        _run_docker(["network", "rm", name], check=False, timeout=30)
+def _ensure_deps(python_bin: Path, source_root: Path) -> None:
+    """Install SearXNG + supporting deps into the venv. Idempotent (pip skips satisfied)."""
+    subprocess.run(
+        [str(python_bin), "-m", "pip", "install", "--upgrade", *_SUPPORT_DEPS],
+        check=True,
+    )
+    subprocess.run(
+        [
+            str(python_bin), "-m", "pip", "install",
+            "--use-pep517", "--no-build-isolation",
+            "-e", str(source_root),
+        ],
+        check=True,
+    )
 
 
-def _ensure_image() -> None:
-    inspect = _run_docker(["image", "inspect", _SEARXNG_IMAGE], check=False)
-    if inspect.returncode == 0:
-        return
-    _run_docker(["pull", _SEARXNG_IMAGE], timeout=_BUILD_TIMEOUT)
-
-
-def _write_settings() -> None:
+def _write_settings(config_dir: Path) -> None:
+    """Write settings.yml. Hardcoded to port 8888, localhost bind, limiter off."""
+    config_dir.mkdir(parents=True, exist_ok=True)
     settings = "\n".join([
         "use_default_settings: true",
         "",
         "server:",
-        '  secret_key: "helix-docker-sandbox"',
+        "  bind_address: 127.0.0.1",
+        f"  port: {_PORT}",
+        '  secret_key: "helix-searxng-local"',
         "  limiter: false",
         "",
         "search:",
@@ -184,23 +194,79 @@ def _write_settings() -> None:
         "    - json",
         "",
     ])
-    (_CONFIG_DIR / "settings.yml").write_text(settings, encoding="utf-8")
+    (config_dir / "settings.yml").write_text(settings, encoding="utf-8")
 
 
-def _wait_ready() -> None:
-    deadline = time.time() + max(1, _READY_TIMEOUT)
-    last_error = "searxng readiness probe did not return success"
-    while time.time() < deadline:
-        completed = _run_docker(
-            ["exec", _CONTAINER_NAME,
-             "python3", "-c",
-             "from urllib.request import urlopen; urlopen('http://localhost:8080/search?q=test&format=json', timeout=5).read(64); print('ready')"],
-            check=False, timeout=15,
+# ----- Runtime helpers ------------------------------------------------------ #
+
+
+def _spawn(python_bin: Path, settings_path: Path, data_dir: Path) -> int:
+    """Launch ``python -m searx.webapp`` as a detached subprocess; return pid."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    stdout_log = open(data_dir / "searxng-stdout.log", "w", encoding="utf-8")
+    stderr_log = open(data_dir / "searxng-stderr.log", "w", encoding="utf-8")
+    env = os.environ.copy()
+    env["SEARXNG_SETTINGS_PATH"] = str(settings_path)
+    try:
+        process = subprocess.Popen(
+            [str(python_bin), "-m", "searx.webapp"],
+            env=env,
+            stdout=stdout_log,
+            stderr=stderr_log,
+            start_new_session=True,
         )
-        if completed.returncode == 0:
-            return
-        detail = (completed.stderr or completed.stdout or "").strip()
-        if detail:
-            last_error = detail
-        time.sleep(max(0.1, _READY_POLL))
+    finally:
+        stdout_log.close()
+        stderr_log.close()
+    return int(process.pid)
+
+
+def _wait_ready(port: int, timeout: int = _READY_TIMEOUT) -> None:
+    """Poll ``/search?q=test&format=json`` until it returns 200 or timeout."""
+    deadline = time.time() + max(1, timeout)
+    url = f"http://127.0.0.1:{port}/search?q=test&format=json"
+    last_error = "SearXNG did not become ready"
+    while time.time() < deadline:
+        try:
+            with urlopen(url, timeout=5) as resp:
+                if 200 <= getattr(resp, "status", 0) < 300:
+                    return
+        except (URLError, OSError, ConnectionError) as exc:
+            last_error = str(exc)
+        except Exception as exc:  # defensive — unusual URL error
+            last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(_READY_POLL)
     raise RuntimeError(f"SearXNG did not become ready: {last_error}")
+
+
+def _kill_pid(pid: int) -> None:
+    """SIGTERM the process, wait briefly, then SIGKILL if still alive."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+
+    deadline = time.time() + _SHUTDOWN_GRACE_SECONDS
+    while time.time() < deadline:
+        if not _pid_alive(pid):
+            return
+        time.sleep(_SHUTDOWN_POLL)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        return
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True iff a process with ``pid`` exists (signal 0 probe)."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but not owned by us; treat as alive.
+        return True
+    return True

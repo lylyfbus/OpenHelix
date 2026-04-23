@@ -36,7 +36,7 @@ def _run_start(argv: list[str]) -> int:
     if args.service == "searxng":
         state = searxng_service.start()
         print(f"SearXNG started: {state['base_url']}")
-        print(f"Network: {state['network_name']}")
+        print(f"PID: {state['pid']}")
         return 0
 
     if args.service == "local-model-service":
