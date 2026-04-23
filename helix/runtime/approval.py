@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Callable, Optional
 
 from helix.core.action import Action
@@ -21,6 +22,85 @@ _APPROVAL_LABELS = {
     "script_args": "Args",
     "timeout_seconds": "Timeout Seconds",
 }
+
+
+# --------------------------------------------------------------------------- #
+# Outside-workspace write detection
+# --------------------------------------------------------------------------- #
+
+# Heuristic: catch literal absolute paths used as write targets. False
+# negatives are expected (variables, pipes, ``$(...)``); the goal is to
+# surface obvious cases in the approval prompt, not to be a hard sandbox.
+
+_BASH_WRITE_PATTERNS = (
+    # Redirects: > /abs, >> /abs, &> /abs
+    re.compile(r'(?:^|[\s;|&(`])(?:>{1,2}|&>)\s*(/[^\s;|&(`)]+)'),
+    # tee [flags] /abs
+    re.compile(r'(?:^|[\s;|&(`])tee\b(?:\s+-\S+)*\s+(/[^\s;|&(`)]+)'),
+    # Destructive commands whose FIRST absolute-path argument is a target.
+    re.compile(
+        r'(?:^|[\s;|&(`])'
+        r'(?:rm|mkdir|touch|chmod|chown|install|rename|truncate)\b'
+        r'(?:\s+-\S+)*\s+(/[^\s;|&(`)]+)'
+    ),
+    # cp/mv/ln: the LAST argument is the destination; approximate by
+    # matching any absolute path that appears after the command word.
+    re.compile(
+        r'(?:^|[\s;|&(`])(?:cp|mv|ln|rsync|scp)\b'
+        r'(?:\s+-\S+)*[^\n;|&`]*?\s(/[^\s;|&(`)]+)'
+    ),
+)
+
+_PY_WRITE_PATTERNS = (
+    # open('/abs', 'w'|'a'|'x'|...)
+    re.compile(r'open\s*\(\s*[\'"](/[^\'"]+)[\'"]\s*,\s*[\'"][wax+ab]+'),
+    # os.remove/unlink/rmdir/mkdir/makedirs('/abs')
+    re.compile(
+        r'(?:os\.(?:remove|unlink|rmdir|mkdir|makedirs|rename|replace|truncate)|'
+        r'shutil\.(?:rmtree|copyfile|copy2?|move|copytree))'
+        r'\s*\(\s*[\'"](/[^\'"]+)[\'"]'
+    ),
+    # Path('/abs').write_text(...), .unlink(), .mkdir(), etc.
+    re.compile(
+        r'Path\s*\(\s*[\'"](/[^\'"]+)[\'"]\s*\)\s*\.'
+        r'(?:write_text|write_bytes|unlink|mkdir|rmdir|touch|rename|replace)\b'
+    ),
+)
+
+
+def detect_outside_workspace_writes(payload: dict, workspace_root: Path) -> list[str]:
+    """Return literal absolute paths the script appears to write to outside workspace.
+
+    Only inline ``script`` text is scanned — ``script_path`` executions are
+    covered by the same-path (``k``) approval instead. Deduplicates results
+    while preserving first-seen order.
+    """
+    script = str(payload.get("script", "") or "")
+    if not script.strip():
+        return []
+
+    code_type = str(payload.get("code_type", "")).strip().lower()
+    patterns = _BASH_WRITE_PATTERNS if code_type == "bash" else _PY_WRITE_PATTERNS
+
+    try:
+        workspace_str = str(Path(workspace_root).expanduser().resolve())
+    except (OSError, RuntimeError):
+        workspace_str = str(Path(workspace_root))
+
+    seen: dict[str, None] = {}
+    for pat in patterns:
+        for m in pat.finditer(script):
+            raw = m.group(1).rstrip('.,;:)]}"\'`')
+            if not raw.startswith("/"):
+                continue
+            try:
+                resolved = str(Path(raw).resolve())
+            except (OSError, RuntimeError):
+                resolved = raw
+            if resolved == workspace_str or resolved.startswith(workspace_str + "/"):
+                continue
+            seen.setdefault(raw, None)
+    return list(seen.keys())
 
 
 class ApprovalPolicy:
@@ -93,6 +173,17 @@ class ApprovalPolicy:
 
         # Prompt user
         details = ["runtime> Action requires approval:"]
+
+        outside_writes = detect_outside_workspace_writes(action.payload, env.workspace)
+        if outside_writes:
+            details.append("")
+            details.append("WARNING: this exec writes to path(s) outside the workspace:")
+            for path_str in outside_writes[:5]:
+                details.append(f"    {path_str}")
+            if len(outside_writes) > 5:
+                details.append(f"    ... and {len(outside_writes) - 5} more")
+            details.append("")
+
         for key, value in iter_exec_payload_items(action.payload):
             label = _APPROVAL_LABELS.get(key, key)
             text = str(value)
