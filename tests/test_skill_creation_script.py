@@ -155,10 +155,10 @@ def test_single_scaffold_validates():
 
 
 def test_bootstrapped_media_skills_validate():
-    class FakeDockerExecutor:
-        approval_profile = "docker-online-rw-workspace-v1:test"
+    class FakeHostExecutor:
+        approval_profile = "host-shell-v1"
 
-        def __init__(self, workspace: Path, *, session_id: str | None = None):
+        def __init__(self, workspace: Path, *, session_id: str | None = None, **kwargs):
             self.workspace = workspace
             self.session_id = session_id
 
@@ -172,16 +172,16 @@ def test_bootstrapped_media_skills_validate():
             pass
 
         def status_fields(self) -> dict[str, str]:
-            return {"sandbox_backend": "docker", "docker_image": "fake-image"}
+            return {"sandbox_backend": "host", "host_python": "fake-python"}
 
         def tool_environment(self) -> dict[str, str]:
             return {"SEARXNG_BASE_URL": "http://fake-searxng:8080"}
 
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        with patch("helix.runtime.host.docker_is_available", return_value=(True, "")):
-            with patch("helix.runtime.host.DockerSandboxExecutor", FakeDockerExecutor):
-                with patch("helix.runtime.host.local_model_service_supported", return_value=False):
+        with patch("helix.runtime.host.HostSandboxExecutor", FakeHostExecutor):
+            with patch("helix.services.searxng.discover", return_value=None):
+                with patch("helix.services.local_model_service.discover", return_value=None):
                     RuntimeHost(workspace=workspace, session_id="skill-validate-01")
 
         gen_validate = skill_creation.run_validate(

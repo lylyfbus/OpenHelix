@@ -11,24 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from helix.core.action import Action
 from helix.core.environment import Environment
-from helix.runtime.host import docker_is_available
 from helpers import sandbox_executor
 from helix.core.state import Turn
 from helix.runtime.approval import ApprovalPolicy
 from helix.runtime.loop import _format_agent_record
 
 
-def _docker_ready() -> bool:
-    available, reason = docker_is_available()
-    if not available:
-        print(f"  Docker unavailable, skipping runtime sandbox test: {reason}")
-        return False
-    return True
-
-
 def test_sandbox_bash_execution():
-    if not _docker_ready():
-        return
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         payload = {
@@ -45,8 +34,6 @@ def test_sandbox_bash_execution():
 
 
 def test_sandbox_python_execution():
-    if not _docker_ready():
-        return
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         payload = {
@@ -62,8 +49,6 @@ def test_sandbox_python_execution():
 
 
 def test_sandbox_failure_exit_code():
-    if not _docker_ready():
-        return
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         payload = {
@@ -78,8 +63,6 @@ def test_sandbox_failure_exit_code():
 
 
 def test_sandbox_invalid_input():
-    if not _docker_ready():
-        return
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         payload = {
@@ -92,8 +75,6 @@ def test_sandbox_invalid_input():
 
 
 def test_sandbox_formats_json_stdout_readably():
-    if not _docker_ready():
-        return
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         payload = {
@@ -120,8 +101,6 @@ def test_sandbox_formats_json_stdout_readably():
 
 
 def test_sandbox_wraps_stderr_readably():
-    if not _docker_ready():
-        return
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         payload = {
@@ -390,8 +369,6 @@ def test_approval_policy_non_exec_passthrough():
 
 
 def test_environment_integration():
-    if not _docker_ready():
-        return
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
         # Use our real executor and an auto policy for hands-free test

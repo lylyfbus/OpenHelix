@@ -26,8 +26,8 @@ from helix.core.state import Turn
 WORKSPACE = Path(__file__).resolve().parent.parent
 
 
-class _FakeDockerExecutor:
-    approval_profile = "docker-online-rw-workspace-v1:test"
+class _FakeHostExecutor:
+    approval_profile = "host-shell-v1"
 
     def __init__(self, workspace: Path, *, session_id: str | None = None, **kwargs):
         self.workspace = workspace
@@ -42,12 +42,11 @@ class _FakeDockerExecutor:
     def shutdown(self) -> None:
         pass
 
-
     def status_fields(self) -> dict[str, str]:
         return {
-            "sandbox_backend": "docker",
+            "sandbox_backend": "host",
             "sandbox_profile": self.approval_profile,
-            "docker_image": "fake-image",
+            "host_python": "fake-python",
         }
 
     def tool_environment(self) -> dict[str, str]:
@@ -63,11 +62,10 @@ def _make_host(workspace: Path, **kwargs) -> RuntimeHost:
     }
     params.update(kwargs)
 
-    with patch("helix.runtime.host.docker_is_available", return_value=(True, "")):
-        with patch("helix.services.searxng.discover", return_value=None):
-            with patch("helix.services.local_model_service.discover", return_value=None):
-                with patch("helix.runtime.host.DockerSandboxExecutor", _FakeDockerExecutor):
-                    return RuntimeHost(**params)
+    with patch("helix.services.searxng.discover", return_value=None):
+        with patch("helix.services.local_model_service.discover", return_value=None):
+            with patch("helix.runtime.host.HostSandboxExecutor", _FakeHostExecutor):
+                return RuntimeHost(**params)
 
 
 # =========================================================================== #
@@ -169,12 +167,12 @@ def test_host_init_with_session_id_loads_existing_state():
         print("  RuntimeHost named session resume OK")
 
 
-def test_host_uses_docker_when_available():
-    """Verify the runtime host uses the Docker sandbox when available."""
+def test_host_uses_host_sandbox():
+    """Verify the runtime host wires up the host-shell sandbox."""
     calls: dict[str, object] = {}
 
-    class FakeDockerExecutor:
-        approval_profile = "docker-online-rw-workspace-v1:test"
+    class FakeHostExecutor:
+        approval_profile = "host-shell-v1"
 
         def __init__(
             self,
@@ -196,33 +194,29 @@ def test_host_uses_docker_when_available():
         def shutdown(self) -> None:
             calls["shutdown"] = True
 
-        def _has_active_sessions(self) -> bool:
-            return False
-
         def status_fields(self) -> dict[str, str]:
-            return {"sandbox_backend": "docker", "docker_image": "fake-image"}
+            return {"sandbox_backend": "host", "host_python": "fake-python"}
 
         def tool_environment(self) -> dict[str, str]:
             return {"SEARXNG_BASE_URL": "http://fake-searxng:8080"}
 
     with tempfile.TemporaryDirectory() as td:
-        with patch("helix.runtime.host.docker_is_available", return_value=(True, "")):
-            with patch("helix.services.searxng.discover", return_value=None):
-                with patch("helix.services.local_model_service.discover", return_value=None):
-                    with patch("helix.runtime.host.DockerSandboxExecutor", FakeDockerExecutor):
-                        host = RuntimeHost(
-                            workspace=Path(td),
-                            session_id="session-01",
-                            endpoint_url="http://localhost:11434/v1",
-                            model="llama3.1:8b",
-                        )
+        with patch("helix.services.searxng.discover", return_value=None):
+            with patch("helix.services.local_model_service.discover", return_value=None):
+                with patch("helix.runtime.host.HostSandboxExecutor", FakeHostExecutor):
+                    host = RuntimeHost(
+                        workspace=Path(td),
+                        session_id="session-01",
+                        endpoint_url="http://localhost:11434/v1",
+                        model="llama3.1:8b",
+                    )
         assert host._sandbox_executor is not None
-        assert host._env.approval_profile == "docker-online-rw-workspace-v1:test"
+        assert host._env.approval_profile == "host-shell-v1"
         assert calls["session_id"] == "session-01"
         assert calls["prepared"] is True
         host._shutdown()
         assert calls["shutdown"] is True
-        print("  RuntimeHost Docker selection OK")
+        print("  RuntimeHost host-shell sandbox selection OK")
 
 
 def test_host_bootstrap_prunes_renamed_packaged_skills():
@@ -255,26 +249,6 @@ def test_host_bootstrap_prunes_renamed_packaged_skills():
         assert (skills_root / "generate-image").exists()
         assert (skills_root / "analyze-image").exists()
         print("  RuntimeHost packaged-skill prune OK")
-
-
-def test_host_requires_docker_when_unavailable():
-    """Verify the runtime host now errors when Docker is unavailable."""
-    with tempfile.TemporaryDirectory() as td:
-        with patch(
-            "helix.runtime.host.docker_is_available",
-            return_value=(False, "docker unavailable"),
-        ):
-            try:
-                RuntimeHost(
-                    workspace=Path(td),
-                    session_id="session-01",
-                    endpoint_url="http://localhost:11434/v1",
-                    model="llama3.1:8b",
-                )
-                assert False, "Expected Docker-unavailable startup to raise"
-            except ValueError as exc:
-                assert "Docker is required but not available" in str(exc)
-        print("  RuntimeHost Docker requirement OK")
 
 
 # =========================================================================== #
@@ -721,8 +695,7 @@ if __name__ == "__main__":
     test_provider_with_api_key()
 
     print("\n=== RuntimeHost Init ===")
-    test_host_uses_docker_when_available()
-    test_host_requires_docker_when_unavailable()
+    test_host_uses_host_sandbox()
     test_host_init()
     test_host_init_controlled()
     test_host_init_with_session_id_loads_existing_state()

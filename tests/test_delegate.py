@@ -19,17 +19,8 @@ from helix.core.environment import Environment
 from helix.runtime.loop import run_loop, _delegate
 from helix.runtime.sub_agent_meta import load as _load_sub_agents_meta
 from helix.core.state import Turn
-from helix.runtime.host import docker_is_available
 from helpers import sandbox_executor
 from helix.runtime.approval import ApprovalPolicy
-
-
-def _docker_ready() -> bool:
-    available, reason = docker_is_available()
-    if not available:
-        print(f"  Docker unavailable, skipping delegation exec test: {reason}")
-        return False
-    return True
 
 
 # =========================================================================== #
@@ -233,8 +224,6 @@ def test_full_delegation_loop():
 
 def test_delegate_with_exec_in_sub_agent():
     """Test sub-agent that uses exec before chatting back."""
-    if not _docker_ready():
-        return
 
     class ExecSubModel:
         def __init__(self):

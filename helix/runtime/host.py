@@ -17,7 +17,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -30,7 +29,7 @@ from ..core.agent import Agent
 from ..core.compactor import Compactor
 from ..core.environment import Environment
 from ..core.state import Turn
-from .sandbox import DockerSandboxExecutor
+from .sandbox import HostSandboxExecutor
 from ..providers.openai_compat import LLMProvider
 from ..services.searxng import discover as discover_searxng
 from ..services.local_model_service import discover as discover_lms
@@ -41,34 +40,13 @@ from .display import StreamingDisplay, write_runtime
 from .debug import render_session_view_html, open_file_in_viewer
 
 
-def docker_is_available() -> tuple[bool, str]:
-    """Check whether Docker is installed and running."""
-    try:
-        completed = subprocess.run(
-            ["docker", "info"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except FileNotFoundError:
-        return False, "docker CLI not found"
-    except subprocess.TimeoutExpired:
-        return False, "docker info timed out"
-    if completed.returncode == 0:
-        return True, ""
-    detail = (completed.stderr or "").strip() or "docker info failed"
-    return False, detail
-
-
 class RuntimeHost:
     """Interactive REPL host for the agentic framework.
 
     On startup, the host:
     1. Bootstraps built-in skills into the workspace
     2. Discovers running services (SearXNG, local model service)
-    3. Prepares the Docker sandbox
+    3. Prepares the host-shell sandbox
     4. Resumes previous session if available
 
     Args:
@@ -121,11 +99,6 @@ class RuntimeHost:
         api_key: str = "",
         mode: str = "controlled",
     ) -> None:
-        # 0. Docker is required for the sandbox runtime
-        available, reason = docker_is_available()
-        if not available:
-            raise ValueError(f"Docker is required but not available: {reason}")
-
         self.workspace = Path(workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.knowledge_root = self.workspace / "knowledge"
@@ -170,15 +143,14 @@ class RuntimeHost:
         local_model_env: dict[str, str] = {}
         if lms:
             local_model_env = {
-                "HELIX_LOCAL_MODEL_SERVICE_URL": f"http://host.docker.internal:{lms['port']}",
+                "HELIX_LOCAL_MODEL_SERVICE_URL": f"http://127.0.0.1:{lms['port']}",
                 "HELIX_LOCAL_MODEL_SERVICE_TOKEN": lms["token"],
             }
 
-        # 5. Docker sandbox
-        self._sandbox_executor = DockerSandboxExecutor(
+        # 5. Host-shell sandbox
+        self._sandbox_executor = HostSandboxExecutor(
             self.workspace,
             session_id=self.session_id,
-            network_name=searxng["network_name"] if searxng else "helix-sandbox-net",
             searxng_base_url=searxng["base_url"] if searxng else "",
             local_model_service_env=local_model_env,
         )

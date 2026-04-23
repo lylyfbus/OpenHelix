@@ -25,13 +25,13 @@ from helix.core.environment import Environment
 from helix.core.agent import Agent
 from helix.core.state import Turn
 from helix.runtime.loop import run_loop
-from helix.runtime.host import docker_is_available
 from helpers import sandbox_executor
 from helix.runtime.approval import ApprovalPolicy
 from helix.runtime.host import RuntimeHost
 
-class _FakeDockerExecutor:
-    approval_profile = "docker-online-rw-workspace-v1:test"
+
+class _FakeHostExecutor:
+    approval_profile = "host-shell-v1"
 
     def __init__(self, workspace: Path, *, session_id: str | None = None, **kwargs):
         self.workspace = workspace
@@ -46,9 +46,8 @@ class _FakeDockerExecutor:
     def shutdown(self) -> None:
         pass
 
-
     def status_fields(self) -> dict[str, str]:
-        return {"sandbox_backend": "docker", "docker_image": "fake-image"}
+        return {"sandbox_backend": "host", "host_python": "fake-python"}
 
     def tool_environment(self) -> dict[str, str]:
         return {"SEARXNG_BASE_URL": "http://fake-searxng:8080"}
@@ -68,19 +67,10 @@ def _make_host(workspace: Path, **kwargs) -> RuntimeHost:
     }
     params.update(kwargs)
 
-    with patch("helix.runtime.host.docker_is_available", return_value=(True, "")):
-        with patch("helix.services.searxng.discover", return_value=None):
-            with patch("helix.services.local_model_service.discover", return_value=None):
-                with patch("helix.runtime.host.DockerSandboxExecutor", _FakeDockerExecutor):
-                    return RuntimeHost(**params)
-
-
-def _docker_ready() -> bool:
-    available, reason = docker_is_available()
-    if not available:
-        print(f"  Docker unavailable, skipping skills exec test: {reason}")
-        return False
-    return True
+    with patch("helix.services.searxng.discover", return_value=None):
+        with patch("helix.services.local_model_service.discover", return_value=None):
+            with patch("helix.runtime.host.HostSandboxExecutor", _FakeHostExecutor):
+                return RuntimeHost(**params)
 
 
 # =========================================================================== #
@@ -219,8 +209,6 @@ def test_bootstrap_prunes_renamed_packaged_skills_but_keeps_user_skills():
 
 def test_full_pipeline_with_skill_exec():
     """End-to-end: PromptBuilder builds prompt, Agent acts, Loop executes."""
-    if not _docker_ready():
-        return
     with tempfile.TemporaryDirectory() as td:
         host = _make_host(Path(td))
         system_prompt = _build_system_prompt(Path(td), "core_agent")
