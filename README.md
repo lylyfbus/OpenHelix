@@ -109,8 +109,10 @@ Everything is inspectable. `/view last_prompt` shows the exact text sent to the 
 
 | Skill | Purpose |
 |---|---|
-| `create-skill` | Create a new reusable skill |
-| `update-skill` | Update an existing skill |
+| `create-skill` | Create a new procedural skill (SKILL.md + optional scripts) |
+| `update-skill` | Update an existing procedural skill |
+| `create-generative-skill` | Create a new ML-backed skill (model_spec + host adapter + scripts) |
+| `update-generative-skill` | Update an existing generative skill (with re-download/restart flow) |
 
 ### Web & media generation
 

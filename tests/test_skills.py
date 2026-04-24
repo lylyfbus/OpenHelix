@@ -138,13 +138,17 @@ def test_bootstrap_skills():
         host = _make_host(Path(td))
         ws_skills = Path(td) / "skills" / "builtin_skills"
         skill_dirs = sorted(p.name for p in ws_skills.iterdir() if p.is_dir())
-        assert len(skill_dirs) == 12, f"Expected 12, got {len(skill_dirs)}: {skill_dirs}"
+        assert len(skill_dirs) == 14, f"Expected 14, got {len(skill_dirs)}: {skill_dirs}"
         assert "search-online-context" in skill_dirs
         assert "generate-image" in skill_dirs
         assert "generate-audio" in skill_dirs
         assert "generate-video" in skill_dirs
         assert "analyze-image" in skill_dirs
         assert "retrieve-knowledge" in skill_dirs
+        assert "create-skill" in skill_dirs
+        assert "create-generative-skill" in skill_dirs
+        assert "update-skill" in skill_dirs
+        assert "update-generative-skill" in skill_dirs
         print(f"  Bootstrap skills OK ({len(skill_dirs)} skills synced)")
 
 
